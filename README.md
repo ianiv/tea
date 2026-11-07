@@ -1,10 +1,8 @@
-<p align="center"><img src="Tea-icon.png" alt="Tea icon: a T-Rex peeking out of a cup of tea" width="160"></p>
-
 # Tea
 
 Tea is a macOS menu bar app that lists every Claude Code session on your Mac and opens the one you pick in [Rex](https://www.superlogical.com/updates/public-testing-beginning). Sessions that other apps run through the Agent SDK are hidden.
 
-<p align="center"><img src="docs/screenshots/popover.png" alt="Tea's menu bar popover listing sessions grouped by status" width="412"></p>
+<p align="center"><img src="docs/marketing.png" alt="Tea's logo beside its popover, open from the menu bar and listing sessions grouped by status" width="800"></p>
 
 ## Features
 
