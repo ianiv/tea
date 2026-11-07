@@ -14,6 +14,8 @@ Tea is a macOS menu bar app (SwiftUI + AppKit, `LSUIElement`, so no Dock icon) t
 pkill -x Tea; open build/Tea.app   # run the new build; `open` would otherwise reuse a running instance
 ```
 
+The build needs a full Xcode toolchain: Command Line Tools lacks the `SwiftUIMacros` plugin, so `@State` fails to compile. If `xcode-select -p` points at `/Library/Developer/CommandLineTools`, prefix the build with `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`. A failed build still deletes the previous `build/Tea.app`, because `build.sh` removes it before compiling.
+
 There are no tests, linter or formatter. To verify a change, build it and check it in the running app.
 
 ## Build notes
