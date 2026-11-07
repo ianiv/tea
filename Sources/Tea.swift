@@ -14,8 +14,9 @@
 //
 // Clicking a card:
 //   - session already in a Rex pane -> focus that pane and bring Rex forward
-//   - background agent              -> new tab in the target Rex session running
-//                                      `claude attach <id>`, then bring Rex forward
+//   - background agent              -> new tab running `claude attach <id>` in the
+//                                      chosen Rex session (or one named Claude, created
+//                                      if needed, until one is chosen), then bring Rex forward
 //   - interactive session elsewhere -> can't be taken over; says so
 
 import AppKit
@@ -338,7 +339,9 @@ final class AgentStore: ObservableObject {
     @Published var rexSessions: [String] = []
     @Published var error: String?
     @Published var notice: String?
-    @AppStorage("targetSession") var targetSession = "Dev"
+    // The Rex session chosen for new tabs; empty until the user picks one.
+    @AppStorage("targetSession") var targetSession = ""
+    static let defaultSessionLabel = "Claude"
     // Collapsed sections, as comma-separated Group raw values; kept across launches.
     @AppStorage("collapsedGroups") private var collapsedGroups = ""
 
@@ -358,6 +361,7 @@ final class AgentStore: ObservableObject {
     private var refreshing = false
     private var timer: Timer?
     private var noticeTask: Task<Void, Never>?
+    private var defaultSessionOpen: Task<Void, Never>?
 
     func start() {
         Task { await refresh() }
@@ -442,14 +446,18 @@ final class AgentStore: ObservableObject {
         return Data(base64Encoded: padded).map { String(decoding: $0, as: UTF8.self) }
     }
 
+    // The Rex server's sessions, or nil if it couldn't be asked.
+    private nonisolated static func rexSessionList() async -> [(id: String, label: String)]? {
+        guard let ls = await run(Tools.rex, ["ls", "--json"]).json() as? [String: Any] else { return nil }
+        return (ls["sessions"] as? [[String: Any]] ?? []).compactMap { s in
+            guard let id = s["session_id"] as? String else { return nil }
+            return (id, (s["label"] as? String) ?? id)
+        }
+    }
+
     // Every terminal block on the Rex server, with its foreground process and status.
     private nonisolated static func rexBlocks() async -> ([(id: String, label: String)], [RexBlock]) {
-        let ls = await run(Tools.rex, ["ls", "--json"])
-        let sessions: [(id: String, label: String)] = ((ls.json() as? [String: Any])?["sessions"] as? [[String: Any]] ?? [])
-            .compactMap { s in
-                guard let id = s["session_id"] as? String else { return nil }
-                return (id, (s["label"] as? String) ?? id)
-            }
+        let sessions = await rexSessionList() ?? []
 
         var blocks: [RexBlock] = []
         await withTaskGroup(of: [RexBlock].self) { group in
@@ -532,16 +540,50 @@ final class AgentStore: ObservableObject {
         guard agent.kind == "background", let id = agent.id else {
             return show("\(agent.name) runs outside Rex and can't be opened from here")
         }
-        guard let target = sessionIds[targetSession] else {
-            return show("No Rex session named “\(targetSession)”")
+        if targetSession.isEmpty {
+            await openInDefaultSession(agent, id: id)
+        } else if let target = sessionIds[targetSession] {
+            await openTab(agent, id: id, in: target)
+        } else {
+            show("No Rex session named “\(targetSession)”. Choose another under Options.")
         }
+    }
+
+    private func openTab(_ agent: Agent, id: String, in session: String) async {
         let r = await run(Tools.rex, [
-            "window", "new", "-s", target, agent.name, "-c", agent.cwd, "--json", "--", "claude", "attach", id,
+            "window", "new", "-s", session, agent.name, "-c", agent.cwd, "--json", "--", "claude", "attach", id,
         ])
         guard r.ok else { return show("Couldn't open \(agent.name): \(r.lastErrorLine)") }
         let windowId = (r.json() as? [String: Any])?["window_id"] as? String
-        await bringRexForward(session: target, window: windowId)
+        await bringRexForward(session: session, window: windowId)
         await refresh()
+    }
+
+    // Rex allows duplicate session labels, so these run one at a time against a fresh
+    // session list: two quick clicks must not create two Claude sessions.
+    private func openInDefaultSession(_ agent: Agent, id: String) async {
+        let previous = defaultSessionOpen
+        let work = Task { @MainActor in
+            await previous?.value
+            guard let sessions = await Self.rexSessionList() else {
+                return show("Couldn't reach Rex to open \(agent.name)")
+            }
+            if let existing = sessions.first(where: { $0.label == Self.defaultSessionLabel }) {
+                return await openTab(agent, id: id, in: existing.id)
+            }
+            // The session's first window runs the attach, so no empty shell tab is left behind.
+            let r = await run(Tools.rex, [
+                "new", Self.defaultSessionLabel, "--window", agent.name, "-c", agent.cwd, "--json", "--", "claude", "attach", id,
+            ])
+            guard r.ok, let created = r.json() as? [String: Any], let session = created["session_id"] as? String else {
+                return show("Couldn't create the \(Self.defaultSessionLabel) session: \(r.lastErrorLine)")
+            }
+            let window = (created["initial_windows"] as? [[String: Any]])?.first?["window_id"] as? String
+            await bringRexForward(session: session, window: window)
+            await refresh()
+        }
+        defaultSessionOpen = work
+        await work.value
     }
 
     private func bringRexForward(session: String, window: String?) async {
@@ -694,6 +736,7 @@ struct ContentView: View {
                                                     AgentCard(row: row, now: context.date)
                                                 }
                                                 .buttonStyle(.plain)
+                                                .padding(.horizontal, 8)
                                             }
                                         }
                                     } header: {
@@ -704,7 +747,6 @@ struct ContentView: View {
                                 }
                             }
                         }
-                        .padding(.horizontal, 8)
                         .padding(.bottom, 8)
                     }
                 }
@@ -720,14 +762,16 @@ struct ContentView: View {
         }
         .frame(minWidth: 240, minHeight: 200)
         .background(mode == .window ? WindowLevel(floating: keepOnTop) : nil)
+        .background(NoInitialFocus())
     }
 
     private var header: some View {
         HStack(spacing: 8) {
-            Text("Tea").font(.headline)
+            if mode == .popover { Text("Tea").font(.headline) }
             Spacer()
             Menu {
                 Picker("New tabs open in", selection: $store.targetSession) {
+                    Text("Not chosen (uses “\(AgentStore.defaultSessionLabel)”)").tag("")
                     ForEach(sessionChoices, id: \.self) { Text($0).tag($0) }
                 }
                 Toggle("Keep detached window on top", isOn: $keepOnTop)
@@ -755,7 +799,10 @@ struct ContentView: View {
     }
 
     private var sessionChoices: [String] {
-        store.rexSessions.contains(store.targetSession) ? store.rexSessions : [store.targetSession] + store.rexSessions
+        // Keep a chosen session that has since gone, so the picker still shows the selection.
+        store.targetSession.isEmpty || store.rexSessions.contains(store.targetSession)
+            ? store.rexSessions
+            : [store.targetSession] + store.rexSessions
     }
 }
 
@@ -778,15 +825,45 @@ struct SectionHeader: View {
                 Text("\(count)").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                 Spacer()
             }
-            .padding(.horizontal, 10)
-            .padding(.top, 10)
-            .padding(.bottom, 4)
+            .padding(.horizontal, 18)
+            .padding(.vertical, 7)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .background(.bar)
         .help(collapsed ? "Show \(group.title)" : "Hide \(group.title)")
     }
+}
+
+// AppKit focuses the first control when a window first becomes key, which puts a focus
+// ring on the options button. Undo that once; Tab still moves focus as usual.
+struct NoInitialFocus: NSViewRepresentable {
+    final class ClearingView: NSView {
+        private var observer: NSObjectProtocol?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard let window, observer == nil else { return }
+            if window.isKeyWindow { return clear(window) }
+            observer = NotificationCenter.default.addObserver(
+                forName: NSWindow.didBecomeKeyNotification, object: window, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.clear(window) }
+            }
+        }
+
+        private func clear(_ window: NSWindow) {
+            if let observer { NotificationCenter.default.removeObserver(observer) }
+            DispatchQueue.main.async { window.makeFirstResponder(nil) }
+        }
+
+        deinit {
+            if let observer { NotificationCenter.default.removeObserver(observer) }
+        }
+    }
+
+    func makeNSView(context: Context) -> NSView { ClearingView() }
+    func updateNSView(_ view: NSView, context: Context) {}
 }
 
 // Sets the hosting window's level, for "Keep window on top".
@@ -824,7 +901,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     let store = AgentStore()
     private var statusItem: NSStatusItem!
-    private let popover = NSPopover()
+    private var popover = NSPopover()
     private var window: NSWindow?
     private var badge: AnyCancellable?
 
@@ -838,17 +915,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         if let button = statusItem.button {
             button.image = NSImage(systemSymbolName: "cup.and.saucer.fill", accessibilityDescription: "Tea")
             button.imagePosition = .imageLeading
-            button.action = #selector(togglePopover)
+            button.action = #selector(statusItemClicked)
             button.target = self
+            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
-
-        popover.behavior = .transient
-        popover.animates = true
-        popover.delegate = self
-        popover.contentSize = Self.popoverSize
-        popover.contentViewController = NSHostingController(
-            rootView: ContentView(mode: .popover).environmentObject(store)
-        )
 
         // Menu bar count: sessions that need you (Needs input + Ready for review).
         badge = store.$rows.sink { [weak self] rows in
@@ -878,42 +948,100 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         defaults.set(true, forKey: "migratedFromClaudeAgents")
     }
 
-    @objc private func togglePopover() {
+    @objc private func statusItemClicked() {
+        let event = NSApp.currentEvent
+        if event?.type == .rightMouseUp || event?.modifierFlags.contains(.control) == true {
+            guard let button = statusItem.button else { return }
+            popover.performClose(nil)
+            statusMenu().popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
+        } else {
+            togglePopover()
+        }
+    }
+
+    private func statusMenu() -> NSMenu {
+        let menu = NSMenu()
+        let quit = NSMenuItem(title: "Quit Tea", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "")
+        quit.target = NSApp
+        menu.addItem(quit)
+        return menu
+    }
+
+    private func togglePopover() {
         guard let button = statusItem.button else { return }
-        if popover.isShown {
+        if let window, windowIsOpen {
+            bringForward(window)
+        } else if popover.contentViewController?.view.window?.isVisible == true {
             popover.performClose(nil)
         } else {
+            // Go by what's on screen, and start fresh: a popover that was dragged away
+            // can't be relied on to reopen.
+            popover.close()
+            popover = makePopover()
             NSApp.activate()
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         }
     }
 
-    // Dragging the popover away detaches it into its own window.
-    func popoverShouldDetach(_ popover: NSPopover) -> Bool { true }
+    private func makePopover() -> NSPopover {
+        let p = NSPopover()
+        p.behavior = .transient
+        p.animates = true
+        p.delegate = self
+        p.contentSize = Self.popoverSize
+        p.contentViewController = NSHostingController(
+            rootView: ContentView(mode: .popover).environmentObject(store)
+        )
+        return p
+    }
 
-    // The detach button: a regular, resizable window where the popover was.
+    // macOS declines NSApp.activate() here while another app is active, leaving the window
+    // raised but without keyboard focus. Opening our own bundle does activate the app.
+    private func bringForward(_ window: NSWindow) {
+        window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
+        let config = NSWorkspace.OpenConfiguration()
+        config.activates = true
+        NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: config)
+    }
+
+    private var windowIsOpen: Bool {
+        window.map { $0.isVisible || $0.isMiniaturized } ?? false
+    }
+
+    // Dragging the popover away opens the same window as the detach button; without
+    // detachableWindow(for:), AppKit would make its own window around the popover's content.
+    func popoverShouldDetach(_ popover: NSPopover) -> Bool { !windowIsOpen }
+
+    func detachableWindow(for popover: NSPopover) -> NSWindow? { detachedWindow() }
+
+    // The detach button.
     func detach() {
-        let origin = popover.contentViewController?.view.window?.frame.origin
+        let window = detachedWindow()
         popover.performClose(nil)
-        if window == nil {
-            let w = NSWindow(
-                contentRect: NSRect(origin: .zero, size: Self.popoverSize),
-                styleMask: [.titled, .closable, .miniaturizable, .resizable],
-                backing: .buffered,
-                defer: false
-            )
-            w.title = "Tea"
-            w.isReleasedWhenClosed = false
-            w.contentViewController = NSHostingController(
-                rootView: ContentView(mode: .window).environmentObject(store)
-            )
-            w.setContentSize(Self.popoverSize)
-            w.setFrameAutosaveName("TeaWindow")
-            if !w.setFrameUsingName("TeaWindow"), let origin { w.setFrameOrigin(origin) }
-            window = w
-        }
-        NSApp.activate()
-        window?.makeKeyAndOrderFront(nil)
+        bringForward(window)
+    }
+
+    // A regular, resizable window, first placed where the popover was.
+    private func detachedWindow() -> NSWindow {
+        if let window { return window }
+        let origin = popover.contentViewController?.view.window?.frame.origin
+        let w = NSWindow(
+            contentRect: NSRect(origin: .zero, size: Self.popoverSize),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        w.title = "Tea"
+        w.isReleasedWhenClosed = false
+        w.contentViewController = NSHostingController(
+            rootView: ContentView(mode: .window).environmentObject(store)
+        )
+        w.setContentSize(Self.popoverSize)
+        w.setFrameAutosaveName("TeaWindow")
+        if !w.setFrameUsingName("TeaWindow"), let origin { w.setFrameOrigin(origin) }
+        window = w
+        return w
     }
 }
 

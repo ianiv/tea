@@ -44,7 +44,7 @@ Key logic:
 - **Rex status overrides session status**: only Rex's record knows a session is waiting on a permission, so a `blocked` record forces `waiting`.
 - **`liveStatus` prefers the session file** over `claude agents --json`, which reports `shell` as `busy`.
 - **`findBlock`** matches a session to a Rex pane by foreground pid, then by argv (`claude attach <id>` or the session ID). The pid match only applies to live sessions, because a finished session's pid may have been reused.
-- **`open`** has three outcomes: focus the existing pane; open a new tab in the target Rex session running `claude attach <id>` (background agents); or show a notice, because interactive sessions outside Rex can't be taken over.
+- **`open`** has three outcomes: focus the existing pane; open a new tab running `claude attach <id>` in the chosen Rex session (background agents), or until one is chosen in a session named `Claude`, created if needed; or show a notice, because interactive sessions outside Rex can't be taken over.
 
 The UI is a popover from the status item, which can detach into a window. Both host the same `ContentView` (`Mode` differs) and share one store. The menu bar badge counts the Needs input and Ready for review rows.
 
