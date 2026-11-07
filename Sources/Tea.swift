@@ -71,8 +71,15 @@ func run(_ executable: String, _ args: [String], timeout: TimeInterval = 8) asyn
     await withCheckedContinuation { cont in
         DispatchQueue.global(qos: .userInitiated).async {
             let p = Process()
-            p.executableURL = URL(fileURLWithPath: executable)
-            p.arguments = args
+            // Process doesn't search PATH, so a bare name goes through env, which
+            // resolves it using Tools.environment.
+            if executable.hasPrefix("/") {
+                p.executableURL = URL(fileURLWithPath: executable)
+                p.arguments = args
+            } else {
+                p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+                p.arguments = [executable] + args
+            }
             p.environment = Tools.environment
             let out = Pipe()
             let err = Pipe()
