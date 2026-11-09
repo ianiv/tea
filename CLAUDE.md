@@ -45,6 +45,7 @@ Key logic:
 - **`liveStatus` prefers the session file** over `claude agents --json`, which reports `shell` as `busy`.
 - **`findBlock`** matches a session to a Rex pane by foreground pid, then by argv (`claude attach <id>` or the session ID). The pid match only applies to live sessions, because a finished session's pid may have been reused.
 - **`open`** has three outcomes: focus the existing pane; open a new tab running `claude attach <id>` in the chosen Rex session (background agents), or until one is chosen in a session named `Claude`, created if needed; or show a notice, because interactive sessions outside Rex can't be taken over.
+- **`newSession`** (the header's + menu) runs a plain `claude` in a recent session folder, Home, or a chosen folder, through the same `openNewTab` placement as a background agent.
 
 The UI is a popover from the status item, which can detach into a window. Both host the same `ContentView` (`Mode` differs) and share one store. The menu bar badge counts the Needs input and Ready for review rows.
 

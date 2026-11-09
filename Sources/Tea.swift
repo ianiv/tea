@@ -18,6 +18,9 @@
 //                                      chosen Rex session (or one named Claude, created
 //                                      if needed, until one is chosen), then bring Rex forward
 //   - interactive session elsewhere -> can't be taken over; says so
+//
+// The + menu starts a brand new `claude` in a chosen folder, in a new tab placed the
+// same way as a background agent's.
 
 import AppKit
 import Combine
@@ -540,20 +543,40 @@ final class AgentStore: ObservableObject {
         guard agent.kind == "background", let id = agent.id else {
             return show("\(agent.name) runs outside Rex and can't be opened from here")
         }
+        await openNewTab(title: agent.name, cwd: agent.cwd, command: ["claude", "attach", id])
+    }
+
+    // Starts a brand new interactive Claude session in `cwd`, in a new Rex tab.
+    func newSession(in cwd: String) async {
+        let name = URL(fileURLWithPath: cwd).lastPathComponent
+        await openNewTab(title: name.isEmpty ? "claude" : name, cwd: cwd, command: ["claude"])
+    }
+
+    // Folders of existing sessions, most recently started first, for the new session menu.
+    var recentFolders: [String] {
+        var seen = Set<String>()
+        return Array(rows.map(\.agent)
+            .sorted { $0.startedAt > $1.startedAt }
+            .map(\.cwd)
+            .filter { !$0.isEmpty && seen.insert($0).inserted }
+            .prefix(8))
+    }
+
+    private func openNewTab(title: String, cwd: String, command: [String]) async {
         if targetSession.isEmpty {
-            await openInDefaultSession(agent, id: id)
+            await openInDefaultSession(title: title, cwd: cwd, command: command)
         } else if let target = sessionIds[targetSession] {
-            await openTab(agent, id: id, in: target)
+            await openTab(title: title, cwd: cwd, command: command, in: target)
         } else {
             show("No Rex session named “\(targetSession)”. Choose another under Options.")
         }
     }
 
-    private func openTab(_ agent: Agent, id: String, in session: String) async {
+    private func openTab(title: String, cwd: String, command: [String], in session: String) async {
         let r = await run(Tools.rex, [
-            "window", "new", "-s", session, agent.name, "-c", agent.cwd, "--json", "--", "claude", "attach", id,
-        ])
-        guard r.ok else { return show("Couldn't open \(agent.name): \(r.lastErrorLine)") }
+            "window", "new", "-s", session, title, "-c", cwd, "--json", "--",
+        ] + command)
+        guard r.ok else { return show("Couldn't open \(title): \(r.lastErrorLine)") }
         let windowId = (r.json() as? [String: Any])?["window_id"] as? String
         await bringRexForward(session: session, window: windowId)
         await refresh()
@@ -561,20 +584,20 @@ final class AgentStore: ObservableObject {
 
     // Rex allows duplicate session labels, so these run one at a time against a fresh
     // session list: two quick clicks must not create two Claude sessions.
-    private func openInDefaultSession(_ agent: Agent, id: String) async {
+    private func openInDefaultSession(title: String, cwd: String, command: [String]) async {
         let previous = defaultSessionOpen
         let work = Task { @MainActor in
             await previous?.value
             guard let sessions = await Self.rexSessionList() else {
-                return show("Couldn't reach Rex to open \(agent.name)")
+                return show("Couldn't reach Rex to open \(title)")
             }
             if let existing = sessions.first(where: { $0.label == Self.defaultSessionLabel }) {
-                return await openTab(agent, id: id, in: existing.id)
+                return await openTab(title: title, cwd: cwd, command: command, in: existing.id)
             }
-            // The session's first window runs the attach, so no empty shell tab is left behind.
+            // The session's first window runs the command, so no empty shell tab is left behind.
             let r = await run(Tools.rex, [
-                "new", Self.defaultSessionLabel, "--window", agent.name, "-c", agent.cwd, "--json", "--", "claude", "attach", id,
-            ])
+                "new", Self.defaultSessionLabel, "--window", title, "-c", cwd, "--json", "--",
+            ] + command)
             guard r.ok, let created = r.json() as? [String: Any], let session = created["session_id"] as? String else {
                 return show("Couldn't create the \(Self.defaultSessionLabel) session: \(r.lastErrorLine)")
             }
@@ -770,6 +793,24 @@ struct ContentView: View {
             if mode == .popover { Text("Tea").font(.headline) }
             Spacer()
             Menu {
+                Section("New Claude session in") {
+                    ForEach(store.recentFolders, id: \.self) { folder in
+                        Button(shortPath(folder)) { Task { await store.newSession(in: folder) } }
+                    }
+                    if !store.recentFolders.contains(Tools.home) {
+                        Button("Home") { Task { await store.newSession(in: Tools.home) } }
+                    }
+                }
+                Divider()
+                Button("Choose Folder…") { chooseFolder() }
+            } label: {
+                Image(systemName: "plus")
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("New Claude session")
+            Menu {
                 Picker("New tabs open in", selection: $store.targetSession) {
                     Text("Not chosen (uses “\(AgentStore.defaultSessionLabel)”)").tag("")
                     ForEach(sessionChoices, id: \.self) { Text($0).tag($0) }
@@ -796,6 +837,19 @@ struct ContentView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
+    }
+
+    private func chooseFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = URL(fileURLWithPath: store.recentFolders.first ?? Tools.home)
+        panel.prompt = "Start Claude"
+        panel.message = "Choose a folder for the new Claude session"
+        NSApp.activate()
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        Task { await store.newSession(in: url.path) }
     }
 
     private var sessionChoices: [String] {
