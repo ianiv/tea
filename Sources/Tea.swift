@@ -377,6 +377,9 @@ struct RexBlock {
     let sessionLabel: String
     let windowId: String
     let blockId: String
+    // The tab's name, when someone named it and this is its only pane. Rex labels an
+    // unnamed tab "Window <last 8 of its ID>" and the app shows the terminal title instead.
+    var tabName: String?
     var foregroundPid: Int?
     var foregroundArgs = ""
     var status: [String: Any]?
@@ -458,11 +461,14 @@ final class AgentStore: ObservableObject {
             .compactMapValues { $0 as? [String: Any] }
 
         rows = list.compactMap(Agent.init).map { agent in
+            // Match the Rex tab: a name given to the tab, else Claude's title.
             var agent = agent
-            if agent.nameIsDerived, let title = titles.title(sessionId: agent.sessionId, cwd: agent.cwd) {
+            let block = Self.findBlock(for: agent, in: blocks)
+            if let tabName = block?.tabName {
+                agent.name = tabName
+            } else if agent.nameIsDerived, let title = titles.title(sessionId: agent.sessionId, cwd: agent.cwd) {
                 agent.name = title
             }
-            let block = Self.findBlock(for: agent, in: blocks)
             let job = agent.id.flatMap { Job(id: $0) }
             let prs = (job?.prURLs ?? []).compactMap { url in prCache[url].flatMap { PRStatus(url: url, $0) } }
             return Self.makeRow(agent: agent, block: block, job: job, prs: prs)
@@ -539,12 +545,14 @@ final class AgentStore: ObservableObject {
                     let windows = (view.json() as? [String: Any])?["windows"] as? [[String: Any]] ?? []
                     for w in windows {
                         guard let windowId = w["window_id"] as? String else { continue }
-                        for layer in w["layers"] as? [[String: Any]] ?? [] {
-                            for b in layer["blocks"] as? [[String: Any]] ?? [] {
-                                guard b["creator_name"] as? String == "com.superlogical.terminal",
-                                      let blockId = b["block_id"] as? String else { continue }
-                                found.append(RexBlock(sessionId: s.id, sessionLabel: s.label, windowId: windowId, blockId: blockId))
-                            }
+                        let panes = (w["layers"] as? [[String: Any]] ?? []).flatMap { $0["blocks"] as? [[String: Any]] ?? [] }
+                        let label = w["label"] as? String ?? ""
+                        let named = panes.count == 1 && !label.isEmpty && label != "Window \(windowId.suffix(8))"
+                        for b in panes {
+                            guard b["creator_name"] as? String == "com.superlogical.terminal",
+                                  let blockId = b["block_id"] as? String else { continue }
+                            found.append(RexBlock(sessionId: s.id, sessionLabel: s.label, windowId: windowId, blockId: blockId,
+                                                  tabName: named ? label : nil))
                         }
                     }
                     return found
@@ -640,9 +648,11 @@ final class AgentStore: ObservableObject {
         }
     }
 
+    // Tabs are left unnamed, so Rex shows Claude's terminal title and a name the user
+    // gives the tab later stands out from Rex's "Window <id>" placeholder (see RexBlock).
     private func openTab(title: String, cwd: String, command: [String], in session: String) async {
         let r = await run(Tools.rex, [
-            "window", "new", "-s", session, title, "-c", cwd, "--json", "--",
+            "window", "new", "-s", session, "-c", cwd, "--json", "--",
         ] + command)
         guard r.ok else { return show("Couldn't open \(title): \(r.lastErrorLine)") }
         let windowId = (r.json() as? [String: Any])?["window_id"] as? String
@@ -664,7 +674,7 @@ final class AgentStore: ObservableObject {
             }
             // The session's first window runs the command, so no empty shell tab is left behind.
             let r = await run(Tools.rex, [
-                "new", Self.defaultSessionLabel, "--window", title, "-c", cwd, "--json", "--",
+                "new", Self.defaultSessionLabel, "-c", cwd, "--json", "--",
             ] + command)
             guard r.ok, let created = r.json() as? [String: Any], let session = created["session_id"] as? String else {
                 return show("Couldn't create the \(Self.defaultSessionLabel) session: \(r.lastErrorLine)")
