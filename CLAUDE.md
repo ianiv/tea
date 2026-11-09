@@ -32,6 +32,7 @@ There are no tests, linter or formatter. To verify a change, build it and check 
 | --- | --- |
 | `claude agents --json --all` | The session list (`Agent`) |
 | `~/.claude/sessions/<pid>.json` | Raw live status, and `entrypoint`, used to hide Agent SDK sessions (`sdk*`) |
+| `~/.claude/projects/*/<sessionId>.jsonl` | The latest `custom-title` / `ai-title`, shown instead of a `derived` (folder placeholder) name so cards match the Rex tab (`TranscriptTitles`) |
 | `~/.claude/jobs/<id>/state.json` | Background job state, tempo, summary, linked PRs (`Job`) |
 | `~/.claude/gh-pr-status-cache.json` | PR state, checks and review (`PRStatus`) |
 | `rex ls`, `rex api call session.view`, `rex block call process` / `program_status`, `ps` | Rex panes, their foreground process, and Claude's program status (`RexBlock`) |

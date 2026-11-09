@@ -194,7 +194,10 @@ struct Agent {
     let pid: Int?
     let id: String?
     let sessionId: String
-    let name: String
+    var name: String
+    // The session file's nameSource is "derived": a placeholder made from the folder
+    // (e.g. "v2-4c"), not the topic title Claude puts in the terminal (and Rex tab) title.
+    let nameIsDerived: Bool
     let cwd: String
     let kind: String
     let startedAt: Date
@@ -219,6 +222,66 @@ struct Agent {
         // such as Mochi's Quick Ask: they aren't yours to open.
         if (session?["entrypoint"] as? String)?.hasPrefix("sdk") == true { return nil }
         liveStatus = (session?["status"] as? String) ?? reported
+        nameIsDerived = session?["nameSource"] as? String == "derived"
+    }
+}
+
+// The latest title Claude saved in a session's transcript,
+// ~/.claude/projects/<cwd with non-alphanumerics as "-">/<sessionId>.jsonl: a
+// "custom-title" (from /rename) or "ai-title" line. Claude re-appends these, so the
+// file is read backward from the end until one turns up, then only as it grows.
+final class TranscriptTitles {
+    private struct Entry { var path: String; var scanned: UInt64; var title: String? }
+    private var entries: [String: Entry] = [:]
+    private static let chunk: UInt64 = 256 * 1024
+
+    func title(sessionId: String, cwd: String) -> String? {
+        guard let path = entries[sessionId]?.path ?? Self.locate(sessionId: sessionId, cwd: cwd),
+              let handle = FileHandle(forReadingAtPath: path) else { return nil }
+        defer { try? handle.close() }
+        var entry = entries[sessionId] ?? Entry(path: path, scanned: 0, title: nil)
+        guard let size = try? handle.seekToEnd(), size != entry.scanned else { return entry.title }
+        // A shrunk file was rewritten: start over.
+        let floor = size < entry.scanned ? 0 : entry.scanned
+        var end = size
+        while end > floor {
+            let start = max(floor, end - min(Self.chunk, end - floor))
+            try? handle.seek(toOffset: start)
+            guard let data = try? handle.read(upToCount: Int(end - start)) else { break }
+            var lines = data.split(separator: UInt8(ascii: "\n"), omittingEmptySubsequences: false)
+            // The first line may be cut off; leave it for the next chunk back.
+            // A chunk inside one long line (such as an inline image) holds no title.
+            var cut: UInt64 = 0
+            if start > floor {
+                guard lines.count > 1 else { end = start; continue }
+                cut = UInt64(lines.removeFirst().count + 1)
+            }
+            if let title = lines.reversed().lazy.compactMap(Self.title(in:)).first {
+                entry.title = title
+                break
+            }
+            end = start + cut
+        }
+        entry.scanned = size
+        entries[sessionId] = entry
+        return entry.title
+    }
+
+    private static func title(in line: Data.SubSequence) -> String? {
+        let custom = Data(#""type":"custom-title""#.utf8), ai = Data(#""type":"ai-title""#.utf8)
+        guard line.range(of: custom) != nil || line.range(of: ai) != nil,
+              let d = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any] else { return nil }
+        let title = (d["customTitle"] as? String) ?? (d["aiTitle"] as? String)
+        return title?.isEmpty == false ? title : nil
+    }
+
+    private static func locate(sessionId: String, cwd: String) -> String? {
+        let projects = "\(Tools.claudeDir)/projects"
+        let folder = String(cwd.unicodeScalars.map { CharacterSet.alphanumerics.contains($0) && $0.isASCII ? Character($0) : "-" })
+        let guess = "\(projects)/\(folder)/\(sessionId).jsonl"
+        if FileManager.default.fileExists(atPath: guess) { return guess }
+        let dirs = (try? FileManager.default.contentsOfDirectory(atPath: projects)) ?? []
+        return dirs.lazy.map { "\(projects)/\($0)/\(sessionId).jsonl" }.first { FileManager.default.fileExists(atPath: $0) }
     }
 }
 
@@ -361,6 +424,7 @@ final class AgentStore: ObservableObject {
     }
 
     private var sessionIds: [String: String] = [:] // label -> id
+    private let titles = TranscriptTitles()
     private var refreshing = false
     private var timer: Timer?
     private var noticeTask: Task<Void, Never>?
@@ -394,6 +458,10 @@ final class AgentStore: ObservableObject {
             .compactMapValues { $0 as? [String: Any] }
 
         rows = list.compactMap(Agent.init).map { agent in
+            var agent = agent
+            if agent.nameIsDerived, let title = titles.title(sessionId: agent.sessionId, cwd: agent.cwd) {
+                agent.name = title
+            }
             let block = Self.findBlock(for: agent, in: blocks)
             let job = agent.id.flatMap { Job(id: $0) }
             let prs = (job?.prURLs ?? []).compactMap { url in prCache[url].flatMap { PRStatus(url: url, $0) } }
