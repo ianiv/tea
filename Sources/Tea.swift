@@ -757,13 +757,22 @@ struct AgentCard: View {
                 if !row.prs.isEmpty {
                     HStack(spacing: 6) {
                         ForEach(row.prs, id: \.url) { pr in
-                            Text("#\(String(pr.number))")
-                                .font(.caption2.monospacedDigit().weight(.medium))
-                                .foregroundStyle(pr.color)
-                                .padding(.horizontal, 5)
-                                .padding(.vertical, 1)
-                                .background(Capsule().fill(pr.color.opacity(0.15)))
-                                .help(prHelp(pr))
+                            Button {
+                                if let url = URL(string: pr.url) { NSWorkspace.shared.open(url) }
+                            } label: {
+                                Text("#\(String(pr.number))")
+                                    .font(.caption2.monospacedDigit().weight(.medium))
+                                    .foregroundStyle(pr.color)
+                                    .padding(.horizontal, 5)
+                                    .padding(.vertical, 1)
+                                    .background(Capsule().fill(pr.color.opacity(0.15)))
+                                    .contentShape(Capsule())
+                            }
+                            .buttonStyle(.plain)
+                            .onHover { inside in
+                                if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+                            }
+                            .help(prHelp(pr) + " · Click to open in browser")
                         }
                     }
                 }
