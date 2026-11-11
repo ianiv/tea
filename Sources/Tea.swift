@@ -755,13 +755,15 @@ struct AgentCard: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 if !row.prs.isEmpty {
-                    HStack(spacing: 6) {
+                    FlowLayout(spacing: 6, lineSpacing: 4) {
                         ForEach(row.prs, id: \.url) { pr in
                             Button {
                                 if let url = URL(string: pr.url) { NSWorkspace.shared.open(url) }
                             } label: {
                                 Text("#\(String(pr.number))")
                                     .font(.caption2.monospacedDigit().weight(.medium))
+                                    .lineLimit(1)
+                                    .fixedSize()
                                     .foregroundStyle(pr.color)
                                     .padding(.horizontal, 5)
                                     .padding(.vertical, 1)
@@ -944,6 +946,49 @@ struct ContentView: View {
         store.targetSession.isEmpty || store.rexSessions.contains(store.targetSession)
             ? store.rexSessions
             : [store.targetSession] + store.rexSessions
+    }
+}
+
+// Lays subviews out left to right at their ideal size, starting a new line when
+// the next one doesn't fit, so a card with many PR badges wraps instead of
+// squeezing them.
+struct FlowLayout: Layout {
+    var spacing: CGFloat
+    var lineSpacing: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let frames = place(subviews, maxWidth: proposal.width ?? .infinity)
+        let width = frames.map(\.maxX).max() ?? 0
+        let height = frames.map(\.maxY).max() ?? 0
+        return CGSize(width: width, height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let frames = place(subviews, maxWidth: bounds.width)
+        for (subview, frame) in zip(subviews, frames) {
+            subview.place(
+                at: CGPoint(x: bounds.minX + frame.minX, y: bounds.minY + frame.minY),
+                proposal: ProposedViewSize(frame.size))
+        }
+    }
+
+    private func place(_ subviews: Subviews, maxWidth: CGFloat) -> [CGRect] {
+        var frames: [CGRect] = []
+        var x: CGFloat = 0
+        var y: CGFloat = 0
+        var lineHeight: CGFloat = 0
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            if x > 0 && x + size.width > maxWidth {
+                x = 0
+                y += lineHeight + lineSpacing
+                lineHeight = 0
+            }
+            frames.append(CGRect(origin: CGPoint(x: x, y: y), size: size))
+            x += size.width + spacing
+            lineHeight = max(lineHeight, size.height)
+        }
+        return frames
     }
 }
 
