@@ -1,7 +1,7 @@
 // Tea (it works with Rex): a menu bar app listing every Claude Code session and
 // opening it in Rex.
 //
-// Sessions come from `claude agents --json`. Each one is grouped the way the
+// Sessions are read from the files `claude agents --json` lists them from. Each one is grouped the way the
 // `claude agents` view groups it (Ready for review, Needs input, Working,
 // Completed), using the same inputs that view reads:
 //   - the session's live status (busy / waiting / idle)
@@ -201,29 +201,104 @@ struct Agent {
     let cwd: String
     let kind: String
     let startedAt: Date
-    // busy / shell / waiting / idle, from ~/.claude/sessions/<pid>.json. `claude agents
-    // --json` reports "shell" (only a background shell or monitor running) as "busy",
-    // but the agents view groups on the raw value, so prefer the session file.
+    // busy / shell / waiting / idle, from ~/.claude/sessions/<pid>.json. (`claude agents
+    // --json` reports "shell", only a background shell or monitor running, as "busy",
+    // but the agents view groups on the raw value.)
     let liveStatus: String?
 
-    init?(_ d: [String: Any]) {
-        guard let sessionId = d["sessionId"] as? String else { return nil }
-        self.sessionId = sessionId
-        pid = d["pid"] as? Int
-        id = d["id"] as? String
-        name = (d["name"] as? String) ?? (d["id"] as? String) ?? sessionId
-        cwd = (d["cwd"] as? String) ?? ""
-        kind = (d["kind"] as? String) ?? "interactive"
-        startedAt = Date(timeIntervalSince1970: ((d["startedAt"] as? Double) ?? 0) / 1000)
-        let reported = d["status"] as? String
-        let file = reported == nil ? nil : pid.flatMap { readJSON("\(Tools.claudeDir)/sessions/\($0).json") as? [String: Any] }
-        let session = file?["sessionId"] as? String == sessionId ? file : nil
+    // An interactive session, from its live session file.
+    init?(session s: [String: Any]) {
+        guard let sessionId = s["sessionId"] as? String else { return nil }
         // Hide sessions other apps run through the Agent SDK (entrypoint "sdk-cli" etc.),
         // such as Mochi's Quick Ask: they aren't yours to open.
-        if (session?["entrypoint"] as? String)?.hasPrefix("sdk") == true { return nil }
-        liveStatus = (session?["status"] as? String) ?? reported
-        nameIsDerived = session?["nameSource"] as? String == "derived"
+        if (s["entrypoint"] as? String)?.hasPrefix("sdk") == true { return nil }
+        self.sessionId = sessionId
+        pid = s["pid"] as? Int
+        id = nil
+        name = (s["name"] as? String) ?? sessionId
+        nameIsDerived = s["nameSource"] as? String == "derived"
+        cwd = (s["cwd"] as? String) ?? ""
+        kind = (s["kind"] as? String) ?? "interactive"
+        startedAt = Date(timeIntervalSince1970: ((s["startedAt"] as? Double) ?? 0) / 1000)
+        liveStatus = s["status"] as? String
     }
+
+    // A background job, from its state file, plus the session file of its process
+    // while one is running.
+    init?(job id: String, state j: [String: Any], session s: [String: Any]?) {
+        if (s?["entrypoint"] as? String)?.hasPrefix("sdk") == true { return nil }
+        self.id = id
+        sessionId = (j["sessionId"] as? String) ?? id
+        pid = s?["pid"] as? Int
+        name = (j["name"] as? String) ?? id
+        nameIsDerived = j["nameSource"] as? String == "derived"
+        cwd = (j["cwd"] as? String) ?? ""
+        kind = "background"
+        if let ms = s?["startedAt"] as? Double {
+            startedAt = Date(timeIntervalSince1970: ms / 1000)
+        } else {
+            startedAt = (j["createdAt"] as? String).flatMap { try? Date($0, strategy: .iso8601) } ?? .distantPast
+        }
+        liveStatus = s?["status"] as? String
+    }
+}
+
+// Every Claude Code session, read from the files `claude agents --json --all` lists
+// them from, to avoid starting the CLI (~150 MB, ~1B instructions) every refresh:
+// - ~/.claude/sessions/<pid>.json for each running claude process, and
+// - ~/.claude/jobs/<id>/state.json for each background job.
+// A job's running process (kind "bg", with jobId) shows as the job, and a terminal
+// parked onto a job (parkedJobId) is hidden, as in the agents view.
+enum SessionFiles {
+    static func agents() -> [Agent] {
+        let fm = FileManager.default
+        let sessionsDir = "\(Tools.claudeDir)/sessions"
+        let sessions: [[String: Any]] = ((try? fm.contentsOfDirectory(atPath: sessionsDir)) ?? [])
+            .filter { $0.hasSuffix(".json") }
+            .compactMap { readJSON("\(sessionsDir)/\($0)") as? [String: Any] }
+            .filter { s in (s["pid"] as? Int).map { isRunning(pid: $0, procStart: s["procStart"] as? String) } ?? false }
+
+        var jobSessions: [String: [String: Any]] = [:]
+        var agents: [Agent] = []
+        for s in sessions {
+            if let jobId = s["jobId"] as? String {
+                jobSessions[jobId] = s
+            } else if s["parkedJobId"] == nil, let agent = Agent(session: s) {
+                agents.append(agent)
+            }
+        }
+
+        let jobsDir = "\(Tools.claudeDir)/jobs"
+        for id in (try? fm.contentsOfDirectory(atPath: jobsDir)) ?? [] {
+            guard let state = readJSON("\(jobsDir)/\(id)/state.json") as? [String: Any],
+                  let agent = Agent(job: id, state: state, session: jobSessions[id]) else { continue }
+            agents.append(agent)
+        }
+        return agents
+    }
+
+    // Whether pid is still the process that wrote the session file. Claude records
+    // its start time (procStart, UTC) so a reused pid can be told apart.
+    private static func isRunning(pid: Int, procStart: String?) -> Bool {
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, Int32(pid)]
+        guard sysctl(&mib, 4, &info, &size, nil, 0) == 0, size > 0 else { return false }
+        // ctime-style, with a space-padded day ("Mon Nov  9 ...").
+        let normalized = procStart?.split(separator: " ").joined(separator: " ")
+        guard let normalized, let recorded = procStartFormat.date(from: normalized) else { return true }
+        let tv = info.kp_proc.p_un.__p_starttime
+        let started = Date(timeIntervalSince1970: TimeInterval(tv.tv_sec))
+        return abs(started.timeIntervalSince(recorded)) < 2
+    }
+
+    private static let procStartFormat: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(identifier: "UTC")
+        f.dateFormat = "EEE MMM d HH:mm:ss yyyy"
+        return f
+    }()
 }
 
 // The latest title Claude saved in a session's transcript,
@@ -418,7 +493,6 @@ struct Row: Identifiable {
 final class AgentStore: ObservableObject {
     @Published var rows: [Row] = []
     @Published var rexSessions: [String] = []
-    @Published var error: String?
     @Published var notice: String?
     // The Rex session chosen for new tabs; empty until the user picks one.
     @AppStorage("targetSession") var targetSession = ""
@@ -445,11 +519,42 @@ final class AgentStore: ObservableObject {
     private var noticeTask: Task<Void, Never>?
     private var defaultSessionOpen: Task<Void, Never>?
 
+    // Each refresh spawns a few `rex` calls per pane, and macOS
+    // bills those child processes to Tea. Poll quickly only while the list is on
+    // screen; otherwise just often enough to keep the menu bar badge current.
+    private static let visibleInterval: TimeInterval = 2
+    private static let hiddenInterval: TimeInterval = 15
+
+    // How many list views (popover, window) are on screen.
+    private var visibleViews = 0
+
     func start() {
         Task { await refresh() }
-        timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+        schedule()
+    }
+
+    func viewAppeared() {
+        visibleViews += 1
+        if visibleViews == 1 {
+            Task { await refresh() }
+            schedule()
+        }
+    }
+
+    func viewDisappeared() {
+        visibleViews = max(0, visibleViews - 1)
+        if visibleViews == 0 { schedule() }
+    }
+
+    private func schedule() {
+        timer?.invalidate()
+        let interval = visibleViews > 0 ? Self.visibleInterval : Self.hiddenInterval
+        let t = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
             Task { @MainActor in await self?.refresh() }
         }
+        t.tolerance = interval / 4
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
     }
 
     func refresh() async {
@@ -457,22 +562,17 @@ final class AgentStore: ObservableObject {
         refreshing = true
         defer { refreshing = false }
 
-        async let agentsResult = run(Tools.claude, ["agents", "--json", "--all"])
+        async let agentsResult = Task.detached { SessionFiles.agents() }.value
         async let blocksResult = Self.rexBlocks()
-        let (agentsRun, (sessions, blocks)) = await (agentsResult, blocksResult)
+        let (agents, (sessions, blocks)) = await (agentsResult, blocksResult)
 
-        guard let list = agentsRun.json() as? [[String: Any]] else {
-            error = "claude agents --json failed: \(agentsRun.lastErrorLine)"
-            return
-        }
-        error = nil
         sessionIds = Dictionary(sessions.map { ($0.label, $0.id) }, uniquingKeysWith: { a, _ in a })
         rexSessions = sessions.map(\.label)
 
         let prCache = (readJSON("\(Tools.claudeDir)/gh-pr-status-cache.json") as? [String: Any] ?? [:])
             .compactMapValues { $0 as? [String: Any] }
 
-        rows = list.compactMap(Agent.init).map { agent in
+        rows = agents.map { agent in
             // Match the Rex tab: a name given to the tab, else Claude's title.
             var agent = agent
             let block = Self.findBlock(for: agent, in: blocks)
@@ -836,14 +936,7 @@ struct ContentView: View {
         VStack(spacing: 0) {
             header
             Divider()
-            if let error = store.error {
-                Label(error, systemImage: "exclamationmark.triangle")
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                    .padding(10)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            if store.rows.isEmpty && store.error == nil {
+            if store.rows.isEmpty {
                 ContentUnavailableView("No Claude sessions", systemImage: "sparkles")
             } else {
                 TimelineView(.periodic(from: .now, by: 1)) { context in
@@ -889,6 +982,8 @@ struct ContentView: View {
         .frame(minWidth: 240, minHeight: 200)
         .background(mode == .window ? WindowLevel(floating: keepOnTop) : nil)
         .background(NoInitialFocus())
+        .onAppear { store.viewAppeared() }
+        .onDisappear { store.viewDisappeared() }
     }
 
     private var header: some View {

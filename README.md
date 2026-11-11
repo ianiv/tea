@@ -51,7 +51,7 @@ The options button also lets you keep the detached window on top. Click a sectio
 
 ## How it works
 
-Every 2 seconds, Tea runs `claude agents --json --all` and asks the `rex` CLI about its panes. It combines that with files Claude Code keeps under `~/.claude`: session status, background job state and cached PR status. Tea doesn't send this data anywhere itself.
+Tea reads the files Claude Code keeps under `~/.claude` (running sessions, background jobs and cached PR status) and asks the `rex` CLI about its panes. It does this every 2 seconds while the list is open and every 15 seconds otherwise. Tea doesn't send this data anywhere itself.
 
 These are internal formats of Claude Code and Rex, so an update to either one could change how Tea groups or displays sessions.
 

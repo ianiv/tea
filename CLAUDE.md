@@ -26,14 +26,13 @@ There are no tests, linter or formatter. To verify a change, build it and check 
 
 ## Architecture
 
-`AgentStore` polls every 2 seconds (`refresh()`, which skips a tick if one is still running) and rebuilds `rows`. Each `Row` combines these sources:
+`AgentStore` polls every 2 seconds while the list is on screen and every 15 seconds otherwise (`refresh()`, which skips a tick if one is still running), and rebuilds `rows`. Each refresh's child processes count toward Tea's energy use in macOS. Each `Row` combines these sources:
 
 | Source | Provides |
 | --- | --- |
-| `claude agents --json --all` | The session list (`Agent`) |
-| `~/.claude/sessions/<pid>.json` | Raw live status, and `entrypoint`, used to hide Agent SDK sessions (`sdk*`) |
+| `~/.claude/sessions/<pid>.json` | Running sessions (`Agent`, via `SessionFiles`): raw live status, and `entrypoint`, used to hide Agent SDK sessions (`sdk*`) |
 | `~/.claude/projects/*/<sessionId>.jsonl` | The latest `custom-title` / `ai-title`, shown instead of a `derived` (folder placeholder) name so cards match the Rex tab (`TranscriptTitles`). A tab the user named in Rex (`RexBlock.tabName`) wins over both |
-| `~/.claude/jobs/<id>/state.json` | Background job state, tempo, summary, linked PRs (`Job`) |
+| `~/.claude/jobs/<id>/state.json` | Background jobs (`Agent`), and their state, tempo, summary, linked PRs (`Job`) |
 | `~/.claude/gh-pr-status-cache.json` | PR state, checks and review (`PRStatus`) |
 | `rex ls`, `rex api call session.view`, `rex block call process` / `program_status`, `ps` | Rex panes, their foreground process, and Claude's program status (`RexBlock`) |
 
@@ -43,7 +42,7 @@ Key logic:
 
 - **`makeRow`** decides both a row's `Group` (the list section) and its `Activity` (the card's status line). `Group` deliberately mirrors how the `claude agents` view groups sessions, including its rules in `Job.terminal` and `PRStatus.health` / `needsReview`, so keep it consistent with that view. `idle` is Tea's only addition.
 - **Rex status overrides session status**: only Rex's record knows a session is waiting on a permission, so a `blocked` record forces `waiting`.
-- **`liveStatus` prefers the session file** over `claude agents --json`, which reports `shell` as `busy`.
+- **`SessionFiles` replaces `claude agents --json --all`**, so a refresh no longer starts the CLI (about 150 MB and 1B instructions). It copies the CLI's rules: a session file counts only if its pid is still the process that wrote it (`procStart`); a job's process (`jobId`) becomes the job's row; a terminal parked onto a job (`parkedJobId`) is hidden. If the CLI's list and Tea's differ, look here. It also keeps the raw `shell` status, which the CLI reports as `busy`.
 - **`findBlock`** matches a session to a Rex pane by foreground pid, then by argv (`claude attach <id>` or the session ID). The pid match only applies to live sessions, because a finished session's pid may have been reused.
 - **`open`** has three outcomes: focus the existing pane; open a new tab running `claude attach <id>` in the chosen Rex session (background agents), or until one is chosen in a session named `Claude`, created if needed; or show a notice, because interactive sessions outside Rex can't be taken over.
 - **`newSession`** (the header's + menu) runs a plain `claude` in a recent session folder, Home, or a chosen folder, through the same `openNewTab` placement as a background agent.
