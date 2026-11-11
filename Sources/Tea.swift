@@ -345,6 +345,18 @@ struct PRStatus {
         review = d["review"] as? String
     }
 
+    // A PR the job links that Claude hasn't fetched into the cache yet, so only
+    // its number is known.
+    init?(url: String) {
+        guard let number = URL(string: url).flatMap({ Int($0.lastPathComponent) }) else { return nil }
+        self.url = url
+        self.number = number
+        state = "UNKNOWN"
+        failed = 0
+        pending = 0
+        review = nil
+    }
+
     // merged / inactive / error / success / warning, as the agents view rates a PR.
     var health: String {
         switch state {
@@ -470,7 +482,9 @@ final class AgentStore: ObservableObject {
                 agent.name = title
             }
             let job = agent.id.flatMap { Job(id: $0) }
-            let prs = (job?.prURLs ?? []).compactMap { url in prCache[url].flatMap { PRStatus(url: url, $0) } }
+            let prs = (job?.prURLs ?? []).compactMap { url in
+                prCache[url].flatMap { PRStatus(url: url, $0) } ?? PRStatus(url: url)
+            }
             return Self.makeRow(agent: agent, block: block, job: job, prs: prs)
         }
         .sorted { a, b in
@@ -803,7 +817,7 @@ struct AgentCard: View {
     }
 
     private func prHelp(_ pr: PRStatus) -> String {
-        var parts = ["PR #\(pr.number)", pr.state.lowercased()]
+        var parts = ["PR #\(pr.number)", pr.state == "UNKNOWN" ? "status not loaded yet" : pr.state.lowercased()]
         if pr.failed > 0 { parts.append("\(pr.failed) failing checks") }
         if pr.pending > 0 { parts.append("\(pr.pending) pending checks") }
         if let review = pr.review { parts.append(review.lowercased().replacingOccurrences(of: "_", with: " ")) }
