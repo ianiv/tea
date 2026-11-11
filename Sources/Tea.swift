@@ -326,10 +326,12 @@ final class TranscriptTitles {
             var lines = data.split(separator: UInt8(ascii: "\n"), omittingEmptySubsequences: false)
             // The first line may be cut off; leave it for the next chunk back.
             // A chunk inside one long line (such as an inline image) holds no title.
+            // (A chunk that is one line plus its newline splits into that line and "",
+            // so check what the cut leaves, not the line count, or `end` never moves.)
             var cut: UInt64 = 0
             if start > floor {
-                guard lines.count > 1 else { end = start; continue }
                 cut = UInt64(lines.removeFirst().count + 1)
+                guard cut < end - start else { end = start; continue }
             }
             if let title = lines.reversed().lazy.compactMap(Self.title(in:)).first {
                 entry.title = title
