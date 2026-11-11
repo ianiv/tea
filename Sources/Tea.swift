@@ -538,7 +538,7 @@ final class AgentStore: ObservableObject {
     private var refreshing = false
     private var timer: Timer?
     private var noticeTask: Task<Void, Never>?
-    private var defaultSessionOpen: Task<Void, Never>?
+    private var defaultSessionOpen: Task<Bool, Never>?
 
     // Each refresh spawns a few `rex` calls per pane, and macOS
     // bills those child processes to Tea. Poll quickly only while the list is on
@@ -773,9 +773,11 @@ final class AgentStore: ObservableObject {
     }
 
     // Starts a brand new interactive Claude session in `cwd`, in a new Rex tab.
-    func newSession(in cwd: String) async {
+    // Returns whether the tab opened; on failure a notice says why.
+    @discardableResult
+    func newSession(in cwd: String) async -> Bool {
         let name = URL(fileURLWithPath: cwd).lastPathComponent
-        await openNewTab(title: name.isEmpty ? "claude" : name, cwd: cwd, command: ["claude"])
+        return await openNewTab(title: name.isEmpty ? "claude" : name, cwd: cwd, command: ["claude"])
     }
 
     // Folders of existing sessions, most recently started first, for the new session menu.
@@ -788,36 +790,43 @@ final class AgentStore: ObservableObject {
             .prefix(8))
     }
 
-    private func openNewTab(title: String, cwd: String, command: [String]) async {
+    @discardableResult
+    private func openNewTab(title: String, cwd: String, command: [String]) async -> Bool {
         if targetSession.isEmpty {
-            await openInDefaultSession(title: title, cwd: cwd, command: command)
+            return await openInDefaultSession(title: title, cwd: cwd, command: command)
         } else if let target = sessionIds[targetSession] {
-            await openTab(title: title, cwd: cwd, command: command, in: target)
+            return await openTab(title: title, cwd: cwd, command: command, in: target)
         } else {
             show("No Rex session named “\(targetSession)”. Choose another under Options.")
+            return false
         }
     }
 
     // Tabs are left unnamed, so Rex shows Claude's terminal title and a name the user
     // gives the tab later stands out from Rex's "Window <id>" placeholder (see RexBlock).
-    private func openTab(title: String, cwd: String, command: [String], in session: String) async {
+    private func openTab(title: String, cwd: String, command: [String], in session: String) async -> Bool {
         let r = await run(Tools.rex, [
             "window", "new", "-s", session, "-c", cwd, "--json", "--",
         ] + command)
-        guard r.ok else { return show("Couldn't open \(title): \(r.lastErrorLine)") }
+        guard r.ok else {
+            show("Couldn't open \(title): \(r.lastErrorLine)")
+            return false
+        }
         let windowId = (r.json() as? [String: Any])?["window_id"] as? String
         await bringRexForward(session: session, window: windowId)
         await refresh()
+        return true
     }
 
     // Rex allows duplicate session labels, so these run one at a time against a fresh
     // session list: two quick clicks must not create two Claude sessions.
-    private func openInDefaultSession(title: String, cwd: String, command: [String]) async {
+    private func openInDefaultSession(title: String, cwd: String, command: [String]) async -> Bool {
         let previous = defaultSessionOpen
-        let work = Task { @MainActor in
-            await previous?.value
+        let work = Task { @MainActor () -> Bool in
+            _ = await previous?.value
             guard let sessions = await Self.rexSessionList() else {
-                return show("Couldn't reach Rex to open \(title)")
+                show("Couldn't reach Rex to open \(title)")
+                return false
             }
             if let existing = sessions.first(where: { $0.label == Self.defaultSessionLabel }) {
                 return await openTab(title: title, cwd: cwd, command: command, in: existing.id)
@@ -827,14 +836,16 @@ final class AgentStore: ObservableObject {
                 "new", Self.defaultSessionLabel, "-c", cwd, "--json", "--",
             ] + command)
             guard r.ok, let created = r.json() as? [String: Any], let session = created["session_id"] as? String else {
-                return show("Couldn't create the \(Self.defaultSessionLabel) session: \(r.lastErrorLine)")
+                show("Couldn't create the \(Self.defaultSessionLabel) session: \(r.lastErrorLine)")
+                return false
             }
             let window = (created["initial_windows"] as? [[String: Any]])?.first?["window_id"] as? String
             await bringRexForward(session: session, window: window)
             await refresh()
+            return true
         }
         defaultSessionOpen = work
-        await work.value
+        return await work.value
     }
 
     private func bringRexForward(session: String, window: String?) async {
@@ -1029,10 +1040,10 @@ struct ContentView: View {
             Menu {
                 Section("New Claude session in") {
                     ForEach(store.recentFolders, id: \.self) { folder in
-                        Button(shortPath(folder)) { Task { await store.newSession(in: folder) } }
+                        Button(shortPath(folder)) { startSession(in: folder) }
                     }
                     if !store.recentFolders.contains(Tools.home) {
-                        Button("Home") { Task { await store.newSession(in: Tools.home) } }
+                        Button("Home") { startSession(in: Tools.home) }
                     }
                 }
                 Divider()
@@ -1083,7 +1094,16 @@ struct ContentView: View {
         panel.message = "Choose a folder for the new Claude session"
         NSApp.activate()
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        Task { await store.newSession(in: url.path) }
+        startSession(in: url.path)
+    }
+
+    // The popover gets out of the way once the session is open; the detached window
+    // stays. On failure the popover stays up to show the notice.
+    private func startSession(in folder: String) {
+        Task {
+            let opened = await store.newSession(in: folder)
+            if opened && mode == .popover { AppDelegate.shared?.closePopover() }
+        }
     }
 
     private var sessionChoices: [String] {
@@ -1345,6 +1365,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     func popoverShouldDetach(_ popover: NSPopover) -> Bool { !windowIsOpen }
 
     func detachableWindow(for popover: NSPopover) -> NSWindow? { detachedWindow() }
+
+    func closePopover() {
+        popover.performClose(nil)
+    }
 
     // The detach button.
     func detach() {
