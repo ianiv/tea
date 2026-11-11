@@ -472,6 +472,25 @@ struct RexBlock {
     var foregroundPid: Int?
     var foregroundArgs = ""
     var status: [String: Any]?
+    // For a `claude agents` pane, the name of the session attached in it, from the
+    // terminal title. Its argv never says which session that is.
+    var attachedName: String?
+
+    var isAgentsView: Bool {
+        let words = foregroundArgs.split(separator: " ")
+        guard let i = words.firstIndex(where: { $0 == "claude" || $0.hasSuffix("/claude") }) else { return false }
+        return words.dropFirst(i + 1).first == "agents"
+    }
+
+    // Claude sets the title to "<status glyph> <session name>", and the glyph changes with its status.
+    static func sessionName(fromTitle title: String) -> String? {
+        let t = title.trimmingCharacters(in: .whitespaces)
+        guard let space = t.firstIndex(of: " ") else { return nil }
+        let glyph = t[..<space]
+        guard !glyph.contains(where: { $0.isLetter || $0.isNumber }) else { return nil }
+        let name = t[space...].trimmingCharacters(in: .whitespaces)
+        return name.isEmpty ? nil : name
+    }
 }
 
 struct Row: Identifiable {
@@ -708,18 +727,33 @@ final class AgentStore: ObservableObject {
                 if let pid = blocks[i].foregroundPid { blocks[i].foregroundArgs = args[pid] ?? "" }
             }
         }
+
+        // A session attached inside the agents view is only identifiable by the pane's title.
+        await withTaskGroup(of: (Int, String?).self) { group in
+            for (i, b) in blocks.enumerated() where b.isAgentsView {
+                group.addTask {
+                    let r = await run(Tools.rex, ["block", "call", "-s", b.sessionId, "-b", b.blockId, "title"])
+                    let title = (r.json() as? [String: Any])?["title"] as? String
+                    return (i, title.flatMap(RexBlock.sessionName(fromTitle:)))
+                }
+            }
+            for await (i, name) in group { blocks[i].attachedName = name }
+        }
         return (sessions, blocks)
     }
 
     private static func findBlock(for agent: Agent, in blocks: [RexBlock]) -> RexBlock? {
         // Finished agents have no live process, and their old pid may since have been reused.
         if agent.liveStatus != nil, let pid = agent.pid, let b = blocks.first(where: { $0.foregroundPid == pid }) { return b }
-        return blocks.first { b in
+        let byArgs = blocks.first { b in
             let words = b.foregroundArgs.split(separator: " ").map(String.init)
             guard words.contains(where: { $0 == "claude" || $0.hasSuffix("/claude") }) else { return false }
             if let id = agent.id, let i = words.firstIndex(of: "attach"), i + 1 < words.count, words[i + 1] == id { return true }
             return b.foregroundArgs.contains(agent.sessionId)
         }
+        if let byArgs { return byArgs }
+        // Last resort, by name: the agents view's argv doesn't say which session it's showing.
+        return blocks.first { $0.attachedName != nil && $0.attachedName == agent.name }
     }
 
     // MARK: Opening
