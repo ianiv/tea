@@ -25,7 +25,11 @@ ident=${TEA_SIGN_IDENTITY:-"Apple Development: Ianiv Schweber (66J53X6839)"}
 widget=1
 if [[ $ident == - ]]; then
   widget=0
-elif ! security find-identity -v -p codesigning | grep -qF "\"$ident\""; then
+else
+  # Captured first: under pipefail, grep -q exiting early can fail the pipeline.
+  ids=$(security find-identity -v -p codesigning 2>/dev/null || true)
+fi
+if (( widget )) && ! grep -qF -- "\"$ident\"" <<<"$ids"; then
   echo "warning: signing identity \"$ident\" not found; building ad hoc, without the widget" >&2
   ident=-
   widget=0
@@ -67,7 +71,8 @@ fi
 echo "built $app"
 
 # Only the installed copy's widget should be registered, or the widget gallery lists two.
-if [[ "${1:-}" != "--install" ]] && (( widget )); then
+# --install unregisters it too, since a run of build/Tea.app may have registered it.
+if (( widget )); then
   pluginkit -r "$appex" 2>/dev/null || true
 fi
 

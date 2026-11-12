@@ -29,8 +29,10 @@ struct Entry: TimelineEntry {
     let date: Date
     let snapshot: TeaSnapshot?
 
-    // Tea rewrites the snapshot about once a minute while it runs.
-    static let staleAfter: TimeInterval = 180
+    // Tea rewrites the snapshot about once a minute while it runs, but only asks for a
+    // reload when it changes, so an entry can't tell a quiet Tea from a stopped one
+    // until the timeline's next reload (15 minutes) reads the file again.
+    static let staleAfter: TimeInterval = 20 * 60
 
     var isStale: Bool {
         guard let snapshot else { return true }
@@ -55,13 +57,14 @@ struct Provider: TimelineProvider {
     }
 
     // One entry now, plus one for when the snapshot goes stale, so "Tea isn't running"
-    // shows up even though a stopped Tea can't ask for a reload.
+    // shows up even though a stopped Tea can't ask for a reload. While Tea runs, the
+    // reload after 15 minutes reads a newer snapshot first and supersedes it.
     func getTimeline(in context: Context, completion: @escaping (Timeline<Entry>) -> Void) {
         let now = Date()
         let snapshot = TeaSnapshot.read()
         var entries = [Entry(date: now, snapshot: snapshot)]
         if let snapshot {
-            let stale = snapshot.generatedAt.addingTimeInterval(Entry.staleAfter + 1)
+            let stale = snapshot.generatedAt.addingTimeInterval(Entry.staleAfter)
             if stale > now { entries.append(Entry(date: stale, snapshot: snapshot)) }
         }
         completion(Timeline(entries: entries, policy: .after(now.addingTimeInterval(15 * 60))))
@@ -110,12 +113,10 @@ struct SmallView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Link(destination: URL(string: "tea://top/blocked")!) {
-                CountView(count: snapshot.needsInput, group: .blocked, symbol: "exclamationmark.circle.fill")
-            }
-            Link(destination: URL(string: "tea://top/review")!) {
-                CountView(count: snapshot.review, group: .review, symbol: "checkmark.circle.fill")
-            }
+            CountLink(count: snapshot.needsInput, group: .blocked, symbol: "exclamationmark.circle.fill",
+                      url: "tea://top/blocked")
+            CountLink(count: snapshot.review, group: .review, symbol: "checkmark.circle.fill",
+                      url: "tea://top/review")
             Spacer(minLength: 0)
             Label("Working \(snapshot.working)", systemImage: "circle.dotted.circle")
                 .font(.caption)
@@ -123,6 +124,22 @@ struct SmallView: View {
             UpdatedView(date: snapshot.generatedAt)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+// A count links to its newest session; a zero count is left to the widget's tea://open.
+struct CountLink: View {
+    let count: Int
+    let group: Group
+    let symbol: String
+    let url: String
+
+    var body: some View {
+        if count > 0, let url = URL(string: url) {
+            Link(destination: url) { CountView(count: count, group: group, symbol: symbol) }
+        } else {
+            CountView(count: count, group: group, symbol: symbol)
+        }
     }
 }
 

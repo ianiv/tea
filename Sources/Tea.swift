@@ -512,7 +512,9 @@ final class AgentStore: ObservableObject {
 
     private var sessionIds: [String: String] = [:] // label -> id
     private let titles = TranscriptTitles()
-    private var refreshing = false
+    private var current: Task<Void, Never>?
+    // Whether a refresh has completed, so `rows` reflects the sessions.
+    private(set) var hasLoaded = false
     private var timer: Timer?
     private var noticeTask: Task<Void, Never>?
     private var defaultSessionOpen: Task<Bool, Never>?
@@ -555,11 +557,22 @@ final class AgentStore: ObservableObject {
         timer = t
     }
 
+    // Skips the call if a refresh is still running.
     func refresh() async {
-        if refreshing { return }
-        refreshing = true
-        defer { refreshing = false }
+        if current != nil { return }
+        let task = Task { await load() }
+        current = task
+        await task.value
+        current = nil
+        hasLoaded = true
+    }
 
+    // Waits for the refresh that's running, or runs one.
+    func refreshNow() async {
+        if let current { await current.value } else { await refresh() }
+    }
+
+    private func load() async {
         async let agentsResult = Task.detached { SessionFiles.agents() }.value
         async let blocksResult = Self.rexBlocks()
         let (agents, (sessions, blocks)) = await (agentsResult, blocksResult)
@@ -1229,7 +1242,7 @@ func shortPath(_ p: String) -> String {
 // reload, so the widget can tell when Tea has stopped.
 @MainActor
 final class WidgetExporter {
-    private static let groups: [Group] = [.blocked, .review, .working]
+    private static let groups: Set<Group> = [.blocked, .review, .working]
     private static let reloadInterval: TimeInterval = 60
     private static let heartbeat: TimeInterval = 60
 
@@ -1323,6 +1336,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var popover = NSPopover()
     private var window: NSWindow?
     private var badge: AnyCancellable?
+    private var exporter: AnyCancellable?
     private let widget: WidgetExporter? = WidgetExporter.isAvailable ? WidgetExporter() : nil
 
     private static let popoverSize = NSSize(width: 340, height: 600)
@@ -1341,10 +1355,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
 
         // Menu bar count: sessions that need you (Needs input + Ready for review).
-        // The desktop widget's snapshot follows the same rows.
         badge = store.$rows.sink { [weak self] rows in
             let count = rows.filter { $0.group == .blocked || $0.group == .review }.count
             self?.statusItem.button?.title = count > 0 ? " \(count)" : ""
+        }
+        // The desktop widget's snapshot follows the same rows, from the first refresh on:
+        // the initial empty list would briefly show the widget no sessions.
+        exporter = store.$rows.dropFirst().sink { [weak self] rows in
             self?.widget?.export(rows)
         }
 
@@ -1441,13 +1458,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             return showPopover()
         }
         // Rows are sorted newest first within a group. Right after launch, or for a
-        // session started since the last refresh, they may not be loaded yet (and a
-        // refresh already running makes refresh() return at once, hence the retries).
+        // session started since the last refresh, the row may not be loaded yet: wait
+        // for the refresh that's running (the first one, at launch), or run one.
         var row = store.rows.first(where: match)
-        for _ in 0..<10 where row == nil {
-            await store.refresh()
+        if row == nil {
+            await store.refreshNow()
             row = store.rows.first(where: match)
-            if row == nil { try? await Task.sleep(for: .milliseconds(300)) }
         }
         guard let row else { return showPopover() }
         store.notice = nil
