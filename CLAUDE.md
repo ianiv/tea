@@ -9,7 +9,7 @@ Tea is a macOS menu bar app (SwiftUI + AppKit, `LSUIElement`, so no Dock icon) t
 ## Commands
 
 ```sh
-./build.sh             # builds build/Tea.app (arm64, macOS 14+, ad-hoc signed)
+./build.sh             # builds build/Tea.app (arm64, macOS 14+, signed with `TEA_SIGN_IDENTITY`, or ad hoc without the widget)
 ./build.sh --install   # also copies it to ~/Applications
 pkill -x Tea; open build/Tea.app   # run the new build; `open` would otherwise reuse a running instance
 ```
@@ -20,7 +20,10 @@ There are no tests, linter or formatter. To verify a change, build it and check 
 
 ## Build notes
 
-- All app code is in `Sources/Tea.swift`. `build.sh` names that file explicitly, so a new source file must be added to its `swiftc` call.
+- App code is in `Sources/Tea.swift`; `Sources/Shared.swift` (`Group`, `Tint`, `AppGroup`, the widget snapshot types) is compiled into both the app and the widget; `Sources/Widget/TeaWidget.swift` is the widget. `build.sh` names each file in its `swiftc` calls, so a new source file must be added there.
+- The desktop widget is `Tea.app/Contents/PlugIns/TeaWidget.appex` (bundle ID `local.ianiv.tea.widget`, `Widget-Info.plist`, whose versions `build.sh` copies from `Info.plist`). It's signed with `Widget.entitlements` (sandbox + App Group) and the app with `Tea.entitlements` (App Group only), inside out and without `--deep`.
+- Signing uses `TEA_SIGN_IDENTITY`, defaulting to `Apple Development: Ianiv Schweber (66J53X6839)`. The App Group `7EN8DG9MKN.local.ianiv.tea` needs no provisioning profile: macOS authorizes a team-prefixed group by the signature's TeamIdentifier (`7EN8DG9MKN`, not the identity's `66J53X6839`). If the identity isn't in the keychain, or `TEA_SIGN_IDENTITY=-`, the build warns and falls back to an ad-hoc app with no widget and no entitlements; the app then skips the snapshot (`WidgetExporter.isAvailable`), since touching the group container unentitled would prompt.
+- Only the installed copy's widget is registered: `--install` runs `pluginkit -a` on it, and a plain build runs `pluginkit -r` on the `build/` copy, so the widget gallery doesn't list two.
 - `Resources/AppIcon.icns` is generated from `Scripts/make-icon.swift`, and only rebuilt when the script is newer than the `.icns`. `Tea-icon.png` is not used by the build.
 - `Info.plist` is copied as is, and the version is set by hand there.
 
@@ -49,9 +52,11 @@ Key logic:
 
 The UI is a popover from the status item, which can detach into a window. Both host the same `ContentView` (`Mode` differs) and share one store. The menu bar badge counts the Needs input and Ready for review rows.
 
+The desktop widget reads a snapshot (`TeaSnapshot`, JSON in the App Group container) that `WidgetExporter` writes from the same `store.$rows` sink as the badge: the Needs input, Ready for review and Working rows, in Tea's order. A change in counts or group membership reloads the widget at once; an activity-only change reloads at most once a minute (with a trailing reload); an unchanged snapshot is rewritten about once a minute without a reload, and the widget shows "Tea isn't running" once it's over 3 minutes old. The widget links back through the `tea` URL scheme (`Info.plist`), handled in `AppDelegate.application(_:open:)`: `tea://open` shows the list, `tea://session/<sessionId>` opens that row as a click would, and `tea://top/blocked|review` opens the newest row in that group; a missing row or a notice shows the popover.
+
 ## Conventions and gotchas
 
-- `Group` is Tea's model enum and shadows `SwiftUI.Group`; write `SwiftUI.Group` if you need the view.
+- `Group` is Tea's model enum (in `Shared.swift`) and shadows `SwiftUI.Group`; write `SwiftUI.Group` if you need the view.
 - Finder-launched apps get a minimal `PATH`, so `Tools` looks up `claude` and `rex` at known absolute paths and `Tools.environment` extends `PATH` for child processes. Run subprocesses through `run()`, which also enforces a timeout.
 - `@AppStorage` inside `AgentStore` doesn't trigger view updates by itself, which is why `toggleCollapsed` calls `objectWillChange.send()`.
 - The app used to be "Claude Agents" (`local.ianiv.claude-agents`). `migrateDefaults()` copies its settings once, and it only needs the keys that existed then.

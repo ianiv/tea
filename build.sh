@@ -18,7 +18,21 @@ if [[ ! -f $icns || Scripts/make-icon.swift -nt $icns ]]; then
   echo "made $icns"
 fi
 
+# Signing: the desktop widget needs a real identity, because the App Group the app and
+# widget share (7EN8DG9MKN.local.ianiv.tea) is authorized by the signature's team ID.
+# Set TEA_SIGN_IDENTITY to another identity, or to - for an ad-hoc build without the widget.
+ident=${TEA_SIGN_IDENTITY:-"Apple Development: Ianiv Schweber (66J53X6839)"}
+widget=1
+if [[ $ident == - ]]; then
+  widget=0
+elif ! security find-identity -v -p codesigning | grep -qF "\"$ident\""; then
+  echo "warning: signing identity \"$ident\" not found; building ad hoc, without the widget" >&2
+  ident=-
+  widget=0
+fi
+
 app="build/Tea.app"
+appex="$app/Contents/PlugIns/TeaWidget.appex"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 
@@ -26,17 +40,44 @@ xcrun --sdk macosx swiftc \
   -O -parse-as-library -swift-version 5 \
   -target arm64-apple-macos14.0 \
   -o "$app/Contents/MacOS/Tea" \
-  Sources/Tea.swift
+  Sources/Shared.swift Sources/Tea.swift
 
 cp Info.plist "$app/Contents/Info.plist"
 cp $icns "$app/Contents/Resources/AppIcon.icns"
-codesign --force --sign - "$app" >/dev/null
+
+if (( widget )); then
+  mkdir -p "$appex/Contents/MacOS"
+  xcrun --sdk macosx swiftc \
+    -O -parse-as-library -swift-version 5 \
+    -target arm64-apple-macos14.0 \
+    -application-extension -Xlinker -application_extension \
+    -o "$appex/Contents/MacOS/TeaWidget" \
+    Sources/Shared.swift Sources/Widget/TeaWidget.swift
+  cp Widget-Info.plist "$appex/Contents/Info.plist"
+  for key in CFBundleShortVersionString CFBundleVersion; do
+    plutil -replace $key -string "$(plutil -extract $key raw Info.plist)" "$appex/Contents/Info.plist"
+  done
+  # Inside out, without --deep, so each gets its own entitlements.
+  codesign --force --sign "$ident" --entitlements Widget.entitlements "$appex" >/dev/null
+  codesign --force --sign "$ident" --entitlements Tea.entitlements "$app" >/dev/null
+else
+  codesign --force --sign - "$app" >/dev/null
+fi
 
 echo "built $app"
+
+# Only the installed copy's widget should be registered, or the widget gallery lists two.
+if [[ "${1:-}" != "--install" ]] && (( widget )); then
+  pluginkit -r "$appex" 2>/dev/null || true
+fi
 
 if [[ "${1:-}" == "--install" ]]; then
   mkdir -p ~/Applications
   rm -rf ~/Applications/Tea.app
   cp -R "$app" ~/Applications/
   echo "installed ~/Applications/Tea.app"
+  if (( widget )); then
+    pluginkit -a ~/Applications/Tea.app/Contents/PlugIns/TeaWidget.appex
+    echo "registered the widget"
+  fi
 fi

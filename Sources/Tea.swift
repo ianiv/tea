@@ -25,6 +25,7 @@
 import AppKit
 import Combine
 import SwiftUI
+import WidgetKit
 
 // MARK: - Process helpers
 
@@ -121,33 +122,7 @@ func readJSON(_ path: String) -> Any? {
 
 // MARK: - Model
 
-// The `claude agents` view's groups, in its order, with `idle` (interactive
-// sessions with no background job, which that view doesn't group) before Completed.
-enum Group: Int, CaseIterable, Identifiable {
-    case review, blocked, working, idle, done
-
-    var id: Int { rawValue }
-
-    var title: String {
-        switch self {
-        case .review: "Ready for review"
-        case .blocked: "Needs input"
-        case .working: "Working"
-        case .done: "Completed"
-        case .idle: "Idle"
-        }
-    }
-
-    var color: Color {
-        switch self {
-        case .review: .purple
-        case .blocked: .orange
-        case .working: .blue
-        case .done: .green
-        case .idle: .secondary
-        }
-    }
-}
+// `Group` (the list sections) is in Shared.swift, which the widget also compiles.
 
 // What the session is doing right now.
 enum Activity {
@@ -177,7 +152,7 @@ enum Activity {
         }
     }
 
-    var color: Color {
+    var tint: Tint {
         switch self {
         case .working: .blue
         case .shell: .teal
@@ -188,6 +163,8 @@ enum Activity {
         case .done: .green
         }
     }
+
+    var color: Color { tint.color }
 }
 
 struct Agent {
@@ -1242,6 +1219,97 @@ func shortPath(_ p: String) -> String {
     p.hasPrefix(Tools.home) ? "~" + p.dropFirst(Tools.home.count) : p
 }
 
+// MARK: - Widget snapshot
+
+// Writes the sessions that need you or are working to the App Group container for the
+// desktop widget (TeaWidget.appex), and asks WidgetKit to reload when they change.
+// WidgetKit budgets reloads, so a change in who's in which group reloads at once, but
+// one in only what a session is doing reloads at most once a minute (with a trailing
+// reload). An unchanged snapshot is still rewritten about once a minute, without a
+// reload, so the widget can tell when Tea has stopped.
+@MainActor
+final class WidgetExporter {
+    private static let groups: [Group] = [.blocked, .review, .working]
+    private static let reloadInterval: TimeInterval = 60
+    private static let heartbeat: TimeInterval = 60
+
+    private var last: TeaSnapshot?
+    private var lastWrite = Date.distantPast
+    private var lastReload = Date.distantPast
+    private var trailingReload: Task<Void, Never>?
+
+    // Only a build signed for the App Group has the widget. Without the entitlement,
+    // touching the group container would make macOS ask for access to other apps' data.
+    static var isAvailable: Bool {
+        guard let plugins = Bundle.main.builtInPlugInsURL else { return false }
+        return FileManager.default.fileExists(atPath: plugins.appendingPathComponent("TeaWidget.appex").path)
+    }
+
+    func export(_ rows: [Row]) {
+        let now = Date()
+        var snapshot = TeaSnapshot(
+            generatedAt: now,
+            needsInput: rows.filter { $0.group == .blocked }.count,
+            review: rows.filter { $0.group == .review }.count,
+            working: rows.filter { $0.group == .working }.count,
+            rows: rows.filter { Self.groups.contains($0.group) }.map { row in
+                SnapRow(id: row.agent.sessionId, name: row.agent.name, group: row.group,
+                        activityLabel: row.activity.label, activitySymbol: row.activity.symbol,
+                        activityTint: row.activity.tint, location: row.location)
+            })
+
+        guard let last else { return write(snapshot, reload: .now) }
+        // Compare everything but the time.
+        snapshot.generatedAt = last.generatedAt
+        if snapshot == last {
+            if now.timeIntervalSince(lastWrite) >= Self.heartbeat {
+                snapshot.generatedAt = now
+                write(snapshot, reload: nil)
+            }
+            return
+        }
+        snapshot.generatedAt = now
+        let membership = { (s: TeaSnapshot) in
+            [s.needsInput, s.review, s.working].map(String.init) + s.rows.map { "\($0.id):\($0.group.rawValue)" }
+        }
+        write(snapshot, reload: membership(snapshot) != membership(last) ? .now : .soon)
+    }
+
+    private enum Reload { case now, soon }
+
+    private func write(_ snapshot: TeaSnapshot, reload: Reload?) {
+        guard let url = AppGroup.snapshotURL else { return }
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .secondsSince1970
+        guard let data = try? encoder.encode(snapshot) else { return }
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        guard (try? data.write(to: url, options: .atomic)) != nil else { return }
+        last = snapshot
+        lastWrite = snapshot.generatedAt
+
+        switch reload {
+        case nil: break
+        case .now: reloadNow()
+        case .soon:
+            let wait = lastReload.addingTimeInterval(Self.reloadInterval).timeIntervalSinceNow
+            if wait <= 0 { return reloadNow() }
+            guard trailingReload == nil else { return }
+            trailingReload = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(wait))
+                guard !Task.isCancelled else { return }
+                self?.reloadNow()
+            }
+        }
+    }
+
+    private func reloadNow() {
+        trailingReload?.cancel()
+        trailingReload = nil
+        lastReload = Date()
+        WidgetCenter.shared.reloadAllTimelines()
+    }
+}
+
 // MARK: - App
 
 // A menu bar item that opens the list in a popover. The popover can be dragged
@@ -1255,6 +1323,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var popover = NSPopover()
     private var window: NSWindow?
     private var badge: AnyCancellable?
+    private let widget: WidgetExporter? = WidgetExporter.isAvailable ? WidgetExporter() : nil
 
     private static let popoverSize = NSSize(width: 340, height: 600)
 
@@ -1272,9 +1341,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
 
         // Menu bar count: sessions that need you (Needs input + Ready for review).
+        // The desktop widget's snapshot follows the same rows.
         badge = store.$rows.sink { [weak self] rows in
             let count = rows.filter { $0.group == .blocked || $0.group == .review }.count
             self?.statusItem.button?.title = count > 0 ? " \(count)" : ""
+            self?.widget?.export(rows)
         }
 
         store.start()
@@ -1319,11 +1390,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     private func togglePopover() {
+        if !windowIsOpen, popoverIsShown {
+            popover.performClose(nil)
+        } else {
+            showPopover()
+        }
+    }
+
+    // Shows the list: the detached window if it's open, else the popover.
+    func showPopover() {
         guard let button = statusItem.button else { return }
         if let window, windowIsOpen {
             bringForward(window)
-        } else if popover.contentViewController?.view.window?.isVisible == true {
-            popover.performClose(nil)
+        } else if popoverIsShown {
+            NSApp.activate()
         } else {
             // Go by what's on screen, and start fresh: a popover that was dragged away
             // can't be relied on to reopen.
@@ -1333,6 +1413,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         }
     }
+
+    private var popoverIsShown: Bool {
+        popover.contentViewController?.view.window?.isVisible == true
+    }
+
+    // tea:// links, from the desktop widget:
+    //   tea://open                  show the list
+    //   tea://session/<sessionId>   open that session, as clicking its card does
+    //   tea://top/blocked|review    open the newest session in Needs input / Ready for review
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls where url.scheme == "tea" {
+            Task { await handle(url) }
+        }
+    }
+
+    private func handle(_ url: URL) async {
+        let arg = url.pathComponents.dropFirst().first ?? ""
+        let match: (Row) -> Bool
+        switch url.host {
+        case "session" where !arg.isEmpty:
+            match = { $0.agent.sessionId == arg }
+        case "top":
+            guard let group = Self.topGroups[arg] else { return showPopover() }
+            match = { $0.group == group }
+        default:
+            return showPopover()
+        }
+        // Rows are sorted newest first within a group. Right after launch, or for a
+        // session started since the last refresh, they may not be loaded yet (and a
+        // refresh already running makes refresh() return at once, hence the retries).
+        var row = store.rows.first(where: match)
+        for _ in 0..<10 where row == nil {
+            await store.refresh()
+            row = store.rows.first(where: match)
+            if row == nil { try? await Task.sleep(for: .milliseconds(300)) }
+        }
+        guard let row else { return showPopover() }
+        store.notice = nil
+        await store.open(row)
+        if store.notice != nil { showPopover() }
+    }
+
+    private static let topGroups: [String: Group] = ["blocked": .blocked, "review": .review]
 
     private func makePopover() -> NSPopover {
         let p = NSPopover()
