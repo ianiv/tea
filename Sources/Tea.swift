@@ -513,8 +513,6 @@ final class AgentStore: ObservableObject {
     private var sessionIds: [String: String] = [:] // label -> id
     private let titles = TranscriptTitles()
     private var current: Task<Void, Never>?
-    // Whether a refresh has completed, so `rows` reflects the sessions.
-    private(set) var hasLoaded = false
     private var timer: Timer?
     private var noticeTask: Task<Void, Never>?
     private var defaultSessionOpen: Task<Bool, Never>?
@@ -564,7 +562,6 @@ final class AgentStore: ObservableObject {
         current = task
         await task.value
         current = nil
-        hasLoaded = true
     }
 
     // Waits for the refresh that's running, or runs one.

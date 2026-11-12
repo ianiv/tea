@@ -36,7 +36,7 @@ struct Entry: TimelineEntry {
 
     var isStale: Bool {
         guard let snapshot else { return true }
-        return date.timeIntervalSince(snapshot.generatedAt) > Self.staleAfter
+        return date.timeIntervalSince(snapshot.generatedAt) >= Self.staleAfter
     }
 }
 

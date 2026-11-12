@@ -29,7 +29,7 @@ There are no tests, linter or formatter. To verify a change, build it and check 
 
 ## Architecture
 
-`AgentStore` polls every 2 seconds while the list is on screen and every 15 seconds otherwise (`refresh()`, which skips a tick if one is still running), and rebuilds `rows`. Each refresh's child processes count toward Tea's energy use in macOS. Each `Row` combines these sources:
+`AgentStore` polls every 2 seconds while the list is on screen and every 15 seconds otherwise (`refresh()`, which skips a tick if one is still running; `refreshNow()`, used by URL handling, awaits the running refresh or starts one), and rebuilds `rows`. Each refresh's child processes count toward Tea's energy use in macOS. Each `Row` combines these sources:
 
 | Source | Provides |
 | --- | --- |
