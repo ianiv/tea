@@ -54,7 +54,7 @@ if (( widget )); then
   xcrun --sdk macosx swiftc \
     -O -parse-as-library -swift-version 5 \
     -target arm64-apple-macos14.0 \
-    -application-extension -Xlinker -application_extension \
+    -application-extension -Xlinker -application_extension -Xlinker -e -Xlinker _NSExtensionMain \
     -o "$appex/Contents/MacOS/TeaWidget" \
     Sources/Shared.swift Sources/Widget/TeaWidget.swift
   cp Widget-Info.plist "$appex/Contents/Info.plist"
