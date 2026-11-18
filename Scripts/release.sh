@@ -19,6 +19,7 @@
 # key in the login keychain. Bump CFBundleShortVersionString and CFBundleVersion in
 # Info.plist and commit them first.
 set -euo pipefail
+caller=$PWD   # a relative --config is resolved against where you ran it from
 cd "${0:A:h}/.."
 source Scripts/config.zsh
 
@@ -42,7 +43,7 @@ while (( $# )); do
     --team) (( $# >= 2 )) || usage; cli_team=$2; shift ;;
     --identity) (( $# >= 2 )) || usage; cli_identity=$2; shift ;;
     --notary-profile) (( $# >= 2 )) || usage; cli_profile=$2; shift ;;
-    --config) (( $# >= 2 )) || usage; cli_config=$2; shift ;;
+    --config) (( $# >= 2 )) || usage; cli_config=$2; [[ -z $2 || $2 == /* ]] || cli_config=$caller/$2; shift ;;
     *) usage ;;
   esac
   shift
