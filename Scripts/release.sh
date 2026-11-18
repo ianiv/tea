@@ -72,6 +72,15 @@ if grep -qF "<sparkle:shortVersionString>$v</sparkle:shortVersionString>" appcas
   die "version $v is already in appcast.xml"
 fi
 
+# The keychain's Sparkle key must match SUPublicEDKey, or installed copies would reject the
+# update. Checked before building, so a wrong key doesn't cost a notarization round trip.
+# generate_keys -p prints only the public key; neither key is printed here.
+[[ -x .deps/sparkle/bin/generate_keys ]] || die "Sparkle's tools aren't in .deps/sparkle; run ./build.sh once to fetch them"
+keychain_key=$(.deps/sparkle/bin/generate_keys -p 2>/dev/null || true)
+plist_key=$(plutil -extract SUPublicEDKey raw Info.plist)
+[[ -n $keychain_key && $keychain_key == "$plist_key" ]] ||
+  die "the keychain's Sparkle key doesn't match SUPublicEDKey in Info.plist (or there's none)"
+
 rm -rf $out && mkdir -p $out
 
 # 2. Build: Developer ID, hardened runtime, timestamp, updater on.
@@ -108,12 +117,7 @@ zip=$out/Tea-$v.zip
 ditto -c -k --keepParent $app $zip
 rm $out/notarize.zip
 
-# 7. EdDSA-sign it, with the key from the login keychain. That key must match the app's
-# SUPublicEDKey, or installed copies would reject the update. -p prints only the public key.
-keychain_key=$(.deps/sparkle/bin/generate_keys -p 2>/dev/null || true)
-app_key=$(plutil -extract SUPublicEDKey raw $app/Contents/Info.plist)
-[[ -n $keychain_key && $keychain_key == $app_key ]] ||
-  die "the keychain's Sparkle key doesn't match SUPublicEDKey in Info.plist (or there's none)"
+# 7. EdDSA-sign it, with the key from the login keychain (checked against SUPublicEDKey above).
 sig=$(.deps/sparkle/bin/sign_update -p $zip)
 len=$(stat -f %z $zip)
 .deps/sparkle/bin/sign_update --verify $zip "$sig"
