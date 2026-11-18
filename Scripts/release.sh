@@ -10,30 +10,65 @@
 #                                          build/release/appcast.xml instead of the repo's.
 #                                          It still notarizes.
 #
-# Needs the Developer ID identity, the notarytool keychain profile tea-notary, and Sparkle's
-# EdDSA private key in the login keychain. Bump CFBundleShortVersionString and
-# CFBundleVersion in Info.plist and commit them first.
+# Also takes --team <ID>, --identity <name>, --notary-profile <name> and --config <file>,
+# in any order, which beat TEA_TEAM_ID, TEA_RELEASE_IDENTITY and TEA_NOTARY_PROFILE in the
+# environment, which beat signing.env (see signing.env.example).
+#
+# Needs a team (TEA_TEAM_ID) and its Developer ID identity in the keychain, the notarytool
+# keychain profile (TEA_NOTARY_PROFILE, default tea-notary), and Sparkle's EdDSA private
+# key in the login keychain. Bump CFBundleShortVersionString and CFBundleVersion in
+# Info.plist and commit them first.
 set -euo pipefail
 cd "${0:A:h}/.."
+source Scripts/config.zsh
 
+# This project's home and update channel; not part of the signing configuration.
 repo=ianiv/tea
-profile=tea-notary
-team=7EN8DG9MKN
+
+usage() {
+  echo "usage: Scripts/release.sh [--local <base-url>] [--team <ID>] [--identity <name>] [--notary-profile <name>] [--config <file>]" >&2
+  exit 64
+}
 
 local_mode=0
 base=
-case ${1:-} in
-  '') (( $# == 0 )) || { echo "usage: Scripts/release.sh [--local <base-url>]" >&2; exit 64; } ;;
-  --local)
-    (( $# == 2 )) || { echo "usage: Scripts/release.sh [--local <base-url>]" >&2; exit 64; }
-    local_mode=1
-    base=$2
-    [[ $base == */ ]] || base+=/
-    ;;
-  *) echo "usage: Scripts/release.sh [--local <base-url>]" >&2; exit 64 ;;
-esac
+cli_team=
+cli_identity=
+cli_profile=
+cli_config=
+while (( $# )); do
+  case $1 in
+    --local) (( $# >= 2 )) || usage; local_mode=1; base=$2; shift ;;
+    --team) (( $# >= 2 )) || usage; cli_team=$2; shift ;;
+    --identity) (( $# >= 2 )) || usage; cli_identity=$2; shift ;;
+    --notary-profile) (( $# >= 2 )) || usage; cli_profile=$2; shift ;;
+    --config) (( $# >= 2 )) || usage; cli_config=$2; shift ;;
+    *) usage ;;
+  esac
+  shift
+done
+if (( local_mode )); then
+  [[ -n $base ]] || usage
+  [[ $base == */ ]] || base+=/
+fi
+
+if [[ -n $cli_config ]]; then
+  tea_read_config "$cli_config" 1
+else
+  tea_read_config signing.env 0
+fi
+team=${cli_team:-${TEA_TEAM_ID:-}}
+identity=${cli_identity:-${TEA_RELEASE_IDENTITY:-}}
+profile=${cli_profile:-${TEA_NOTARY_PROFILE:-tea-notary}}
 
 die() { echo "error: $*" >&2; exit 1; }
+
+# A release states its team, so the checks in step 5 have something to compare against.
+[[ -n $team ]] || die "--release needs a team: set TEA_TEAM_ID in signing.env (see signing.env.example), or pass --team"
+if [[ ! $team =~ '^[A-Z0-9]{10}$' ]]; then
+  echo "error: team ID \"$team\" isn't 10 capital letters and digits" >&2
+  exit 64
+fi
 
 v=$(plutil -extract CFBundleShortVersionString raw Info.plist)
 b=$(plutil -extract CFBundleVersion raw Info.plist)
@@ -81,20 +116,27 @@ plist_key=$(plutil -extract SUPublicEDKey raw Info.plist)
 [[ -n $keychain_key && $keychain_key == "$plist_key" ]] ||
   die "the keychain's Sparkle key doesn't match SUPublicEDKey in Info.plist (or there's none)"
 
+# One network call, but it saves a build and a notarization upload when the profile is missing.
+xcrun notarytool history --keychain-profile "$profile" >/dev/null 2>&1 ||
+  die "notarytool keychain profile \"$profile\" not found or not valid (xcrun notarytool store-credentials $profile …)"
+
 rm -rf $out && mkdir -p $out
 
 # 2. Build: Developer ID, hardened runtime, timestamp, updater on.
-./build.sh --release
+build_args=(--release --team "$team")
+[[ -z $identity ]] || build_args+=(--identity "$identity")
+[[ -z $cli_config ]] || build_args+=(--config "$cli_config")
+./build.sh "${build_args[@]}"
 
 # 3. Notarize. --wait's exit code doesn't say whether Apple accepted it, so read the status,
 # and fetch the log when it isn't Accepted, even if submit itself failed.
 ditto -c -k --keepParent $app $out/notarize.zip
-xcrun notarytool submit $out/notarize.zip --keychain-profile $profile --wait --output-format json > $out/notary.json || true
+xcrun notarytool submit $out/notarize.zip --keychain-profile "$profile" --wait --output-format json > $out/notary.json || true
 notary_status=$(plutil -extract status raw $out/notary.json 2>/dev/null || echo unknown)
 notary_id=$(plutil -extract id raw $out/notary.json 2>/dev/null || echo unknown)
 if [[ $notary_status != Accepted ]]; then
   echo "notarization $notary_id: $notary_status" >&2
-  [[ $notary_id == unknown ]] || xcrun notarytool log "$notary_id" --keychain-profile $profile >&2 || true
+  [[ $notary_id == unknown ]] || xcrun notarytool log "$notary_id" --keychain-profile "$profile" >&2 || true
   exit 1
 fi
 echo "notarized ($notary_id)"
@@ -109,8 +151,15 @@ assessment=$(spctl -a -vv -t exec $app 2>&1 || true)
 echo $assessment
 [[ $assessment == *accepted* && $assessment == *"source=Notarized Developer ID"* ]] ||
   die "Gatekeeper doesn't accept $app as notarized"
-[[ $(codesign -dvv $app/Contents/PlugIns/TeaWidget.appex 2>&1) == *"TeamIdentifier=$team"* ]] ||
-  die "the widget isn't signed by team $team"
+group="$team.$(plutil -extract CFBundleIdentifier raw Info.plist)"
+for bundle in $app $app/Contents/PlugIns/TeaWidget.appex; do
+  [[ $(codesign -dvv $bundle 2>&1) == *"TeamIdentifier=$team"* ]] ||
+    die "$bundle isn't signed by team $team"
+  [[ $(codesign -d --entitlements - --xml $bundle 2>/dev/null) == *"<string>$group</string>"* ]] ||
+    die "$bundle's entitlements don't have the App Group $group"
+  [[ $(plutil -extract TeaAppGroup raw $bundle/Contents/Info.plist 2>/dev/null) == "$group" ]] ||
+    die "$bundle's Info.plist doesn't have TeaAppGroup $group"
+done
 
 # 6. Zip the stapled app.
 zip=$out/Tea-$v.zip

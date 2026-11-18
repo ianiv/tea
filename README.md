@@ -40,6 +40,8 @@ open ~/Applications/Tea.app
 
 `./build.sh` without `--install` only builds `build/Tea.app`. The first build downloads [Sparkle](https://sparkle-project.org), the update framework. Builds from source don't update themselves.
 
+With no configuration, `./build.sh` makes an ad-hoc build without the desktop widget. The widget needs code signing, because the app and widget share an App Group. To sign, copy `signing.env.example` to `signing.env` and set `TEA_TEAM_ID` to your Apple Developer team ID. The build picks your Apple Development certificate for that team. You can also pass `--team <ID>`, or `--identity "<name>"` for a specific certificate. Flags override environment variables, which override `signing.env`.
+
 ## Usage
 
 Click the cup in the menu bar to open the list. If the window is already open, this brings it to the front. Right-click the cup to check for updates or quit.

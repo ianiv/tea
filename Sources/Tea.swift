@@ -1252,12 +1252,10 @@ final class WidgetExporter {
     private var lastReload = Date.distantPast
     private var trailingReload: Task<Void, Never>?
 
-    // Only a build signed for the App Group has the widget. Without the entitlement,
-    // touching the group container would make macOS ask for access to other apps' data.
-    static var isAvailable: Bool {
-        guard let plugins = Bundle.main.builtInPlugInsURL else { return false }
-        return FileManager.default.fileExists(atPath: plugins.appendingPathComponent("TeaWidget.appex").path)
-    }
+    // Only a build signed for the App Group has the widget, and build.sh sets TeaAppGroup
+    // only then. Without the entitlement, touching the group container would make macOS ask
+    // for access to other apps' data.
+    static var isAvailable: Bool { AppGroup.id != nil }
 
     func export(_ rows: [Row]) {
         let now = Date()
