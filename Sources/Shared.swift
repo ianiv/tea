@@ -52,11 +52,14 @@ enum Tint: String, Codable {
 }
 
 enum AppGroup {
-    // macOS authorizes a team-prefixed group by the code signature's TeamIdentifier.
-    static let id = "7EN8DG9MKN.local.ianiv.tea"
+    // Set by build.sh to <team>.<bundle ID>, the same value it signs into the entitlements;
+    // macOS authorizes a team-prefixed group by the signature's TeamIdentifier. Absent in
+    // ad-hoc builds, which have no entitlements and so must not touch a group container.
+    static let id: String? = Bundle.main.object(forInfoDictionaryKey: "TeaAppGroup") as? String
 
     static var snapshotURL: URL? {
-        FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: id)?
+        guard let id else { return nil }
+        return FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: id)?
             .appendingPathComponent("snapshot.json")
     }
 }
