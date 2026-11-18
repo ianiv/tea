@@ -18,11 +18,18 @@ Tea is a macOS menu bar app that lists every Claude Code session on your Mac and
 - macOS 14 or later on Apple silicon
 - [Claude Code](https://claude.com/claude-code)
 - [Rex](https://www.superlogical.com/updates/public-testing-beginning), which is currently in private beta
-- Xcode, to build. Command Line Tools alone won't work, because they lack the SwiftUI macro plugin. If `xcode-select -p` prints `/Library/Developer/CommandLineTools`, run `sudo xcode-select -s /Applications/Xcode.app`.
 
 ## Install
 
-There's no prebuilt release, so build it from source:
+Download `Tea-<version>.zip` from the [latest release](https://github.com/ianiv/tea/releases/latest), unzip it, move `Tea.app` to `/Applications` (or `~/Applications`) and open it.
+
+### Updates
+
+Tea checks for updates itself. On its second launch it asks whether to check automatically, and it always shows what's new and asks before installing an update. To check now, choose Check for Updates… in the options menu, or right-click the cup.
+
+### Build from source
+
+Building needs Xcode. Command Line Tools alone won't work, because they lack the SwiftUI macro plugin. If `xcode-select -p` prints `/Library/Developer/CommandLineTools`, run `sudo xcode-select -s /Applications/Xcode.app`.
 
 ```sh
 git clone https://github.com/ianiv/tea.git
@@ -31,11 +38,11 @@ cd tea
 open ~/Applications/Tea.app
 ```
 
-`./build.sh` without `--install` only builds `build/Tea.app`.
+`./build.sh` without `--install` only builds `build/Tea.app`. The first build downloads [Sparkle](https://sparkle-project.org), the update framework. Builds from source don't update themselves.
 
 ## Usage
 
-Click the cup in the menu bar to open the list. If the window is already open, this brings it to the front. Right-click the cup to quit.
+Click the cup in the menu bar to open the list. If the window is already open, this brings it to the front. Right-click the cup to check for updates or quit.
 
 Clicking a session depends on where it's running:
 
