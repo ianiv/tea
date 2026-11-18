@@ -65,6 +65,10 @@ widget=1
 sign_flags=()
 if (( release )); then
   ident=${TEA_RELEASE_IDENTITY:-"Developer ID Application: Ianiv Schweber (7EN8DG9MKN)"}
+  if [[ $ident == - ]]; then
+    echo "error: --release can't build ad hoc; TEA_RELEASE_IDENTITY must name a Developer ID identity" >&2
+    exit 1
+  fi
   # Hardened runtime and a secure timestamp, both required for notarization.
   sign_flags=(--options runtime --timestamp)
 else

@@ -2,8 +2,8 @@
 # Builds, notarizes and publishes a Tea release.
 #
 #   Scripts/release.sh                     the real release: checks the tag, the tree and
-#                                          origin/main, adds the item to appcast.xml and
-#                                          creates the GitHub release. Pushing the appcast
+#                                          origin/main, creates the GitHub release, then
+#                                          adds the item to appcast.xml. Pushing the appcast
 #                                          is left to you, and printed at the end.
 #   Scripts/release.sh --local <base-url>  a rehearsal: skips the git and GitHub checks,
 #                                          serves the zip from <base-url>, and writes
@@ -77,9 +77,10 @@ rm -rf $out && mkdir -p $out
 # 2. Build: Developer ID, hardened runtime, timestamp, updater on.
 ./build.sh --release
 
-# 3. Notarize. --wait's exit code doesn't say whether Apple accepted it, so read the status.
+# 3. Notarize. --wait's exit code doesn't say whether Apple accepted it, so read the status,
+# and fetch the log when it isn't Accepted, even if submit itself failed.
 ditto -c -k --keepParent $app $out/notarize.zip
-xcrun notarytool submit $out/notarize.zip --keychain-profile $profile --wait --output-format json > $out/notary.json
+xcrun notarytool submit $out/notarize.zip --keychain-profile $profile --wait --output-format json > $out/notary.json || true
 notary_status=$(plutil -extract status raw $out/notary.json 2>/dev/null || echo unknown)
 notary_id=$(plutil -extract id raw $out/notary.json 2>/dev/null || echo unknown)
 if [[ $notary_status != Accepted ]]; then
@@ -107,7 +108,12 @@ zip=$out/Tea-$v.zip
 ditto -c -k --keepParent $app $zip
 rm $out/notarize.zip
 
-# 7. EdDSA-sign it, with the key from the login keychain.
+# 7. EdDSA-sign it, with the key from the login keychain. That key must match the app's
+# SUPublicEDKey, or installed copies would reject the update. -p prints only the public key.
+keychain_key=$(.deps/sparkle/bin/generate_keys -p 2>/dev/null || true)
+app_key=$(plutil -extract SUPublicEDKey raw $app/Contents/Info.plist)
+[[ -n $keychain_key && $keychain_key == $app_key ]] ||
+  die "the keychain's Sparkle key doesn't match SUPublicEDKey in Info.plist (or there's none)"
 sig=$(.deps/sparkle/bin/sign_update -p $zip)
 len=$(stat -f %z $zip)
 .deps/sparkle/bin/sign_update --verify $zip "$sig"
@@ -125,11 +131,8 @@ cat > $out/item.xml <<EOF
       <enclosure url="${base}Tea-$v.zip" length="$len" type="application/octet-stream" sparkle:edSignature="$sig"/>
     </item>
 EOF
-if (( local_mode )); then
-  feed=$out/appcast.xml
-else
-  feed=appcast.xml
-fi
+# Built in $out either way; real mode copies it over appcast.xml only once the release exists.
+feed=$out/appcast.xml
 grep -q 'release.sh inserts each release' appcast.xml || die "appcast.xml has no insertion marker"
 awk -v item=$out/item.xml '{print} /release.sh inserts each release/ {while ((getline l < item) > 0) print l}' \
   appcast.xml > $out/appcast.tmp
@@ -144,7 +147,13 @@ if (( local_mode )); then
 fi
 
 # 9. The GitHub release, at the commit just checked against origin/main.
-gh release create "v$v" $zip -R $repo --target "$(git rev-parse HEAD)" --title "Tea $v" --generate-notes
+if ! gh release create "v$v" $zip -R $repo --target "$(git rev-parse HEAD)" --title "Tea $v" --generate-notes; then
+  echo "error: gh release create failed. appcast.xml is untouched." >&2
+  echo "If it left a release or tag behind (gh release view v$v -R $repo), remove it before retrying:" >&2
+  echo "  gh release delete v$v -R $repo --yes --cleanup-tag" >&2
+  exit 1
+fi
+cp $feed appcast.xml
 
 # 10. The appcast goes up only after the asset exists, or clients would get a 404.
 echo
