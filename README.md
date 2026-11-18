@@ -25,7 +25,7 @@ Download `Tea-<version>.zip` from the [latest release](https://github.com/ianiv/
 
 ### Updates
 
-Tea checks for updates itself. On its second launch it asks whether to check automatically, and it always shows what's new and asks before installing an update. To check now, choose Check for Updates… in the options menu, or right-click the cup.
+Tea checks for updates itself. On its second launch it asks whether to check automatically, and it always asks before installing an update. To check now, choose Check for Updates… in the options menu, or right-click the cup.
 
 ### Build from source
 
