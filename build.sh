@@ -7,10 +7,12 @@
 #   --team <ID>        the Apple Developer team to sign for (TEA_TEAM_ID)
 #   --identity <name>  the certificate to sign with, by name or SHA-1, or - for ad hoc
 #                      (TEA_SIGN_IDENTITY, or TEA_RELEASE_IDENTITY with --release)
-#   --config <file>    read the signing settings from <file> instead of signing.env
+#   --config <file>    read the signing settings from <file> instead of signing.env (a
+#                      relative path is from the directory you run it in)
 # Flags beat environment variables, which beat signing.env (gitignored; see
 # signing.env.example). With nothing configured, the build is ad hoc, without the widget.
 set -euo pipefail
+caller=$PWD   # a relative --config is resolved against where you ran it from
 cd "${0:A:h}"
 source Scripts/config.zsh
 
@@ -31,7 +33,7 @@ while (( $# )); do
     --release) release=1 ;;
     --team) (( $# >= 2 )) || usage; cli_team=$2; shift ;;
     --identity) (( $# >= 2 )) || usage; cli_identity=$2; shift ;;
-    --config) (( $# >= 2 )) || usage; cli_config=$2; shift ;;
+    --config) (( $# >= 2 )) || usage; cli_config=$2; [[ -z $2 || $2 == /* ]] || cli_config=$caller/$2; shift ;;
     *) usage ;;
   esac
   shift
@@ -88,7 +90,8 @@ ln -sfn sparkle-$sparkle_version .deps/sparkle   # Scripts/release.sh uses .deps
 # Resolved before the old build is deleted, so a configuration error leaves it in place:
 #   - identity -: ad hoc, without the widget (an error with --release)
 #   - an identity: it must be in the keychain, and its certificate's team (the OU) becomes
-#     the team; a configured team that differs is an error
+#     the team; a configured team that differs is an error, and so is an identity not
+#     named "Developer ID Application: " with --release
 #   - only a team: the first valid "Apple Development: " (or, with --release, "Developer
 #     ID Application: ") identity whose certificate is for that team
 #   - neither: ad hoc, without the widget (an error with --release)
@@ -136,6 +139,9 @@ elif [[ -n $ident || -n $team ]]; then
     (( $#found == 1 )) || die "signing identity \"$ident\" is ambiguous; set it to the SHA-1 instead"
     sign_id=${shas[$found[1]]}
     sign_name=${names[$found[1]]}
+    if (( release )) && [[ $sign_name != "$prefix"* ]]; then
+      die "--release needs a Developer ID Application identity, not \"$sign_name\""
+    fi
     cert_team=$(tea_cert_team "$sign_id" "$sign_name")
     [[ -n $cert_team ]] || die "couldn't read the team from the certificate of \"$sign_name\""
     if [[ -n $team && $team != "$cert_team" ]]; then
@@ -167,7 +173,7 @@ fi
 if (( widget )); then
   group="$team.$(plutil -extract CFBundleIdentifier raw Info.plist)"
 fi
-sign() { codesign --force --sign "$sign_id" "${sign_flags[@]}" "$@" >/dev/null }
+sign() { codesign --force --sign "$sign_id" "${sign_flags[@]}" "$@" >/dev/null; }
 
 app="build/Tea.app"
 appex="$app/Contents/PlugIns/TeaWidget.appex"
@@ -248,6 +254,14 @@ if (( widget )); then
 fi
 
 if (( install )); then
+  if (( ! widget )); then
+    if [[ -d ~/Applications/Tea.app/Contents/PlugIns/TeaWidget.appex ]]; then
+      echo "WARNING: replacing the signed ~/Applications/Tea.app with an ad-hoc build: the desktop widget goes away." >&2
+    else
+      echo "WARNING: installing an ad-hoc build, without the desktop widget." >&2
+    fi
+    echo "WARNING: to keep it signed, create signing.env (copy signing.env.example) and rebuild with --install." >&2
+  fi
   mkdir -p ~/Applications
   rm -rf ~/Applications/Tea.app
   cp -R "$app" ~/Applications/
