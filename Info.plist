@@ -26,6 +26,12 @@
   <true/>
   <key>NSSupportsAutomaticTermination</key>
   <false/>
+  <key>SUFeedURL</key>
+  <string>https://raw.githubusercontent.com/ianiv/tea/main/appcast.xml</string>
+  <key>SUPublicEDKey</key>
+  <string>EK8Tfbi0rDuvFr6924vGymtgnAWCQsdcVfebBCnVLmw=</string>
+  <key>SUVerifyUpdateBeforeExtraction</key>
+  <true/>
   <key>CFBundleURLTypes</key>
   <array>
     <dict>

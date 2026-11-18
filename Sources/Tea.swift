@@ -24,6 +24,7 @@
 
 import AppKit
 import Combine
+import Sparkle
 import SwiftUI
 import WidgetKit
 
@@ -1049,6 +1050,9 @@ struct ContentView: View {
                 }
                 Toggle("Keep detached window on top", isOn: $keepOnTop)
                 Divider()
+                if AppDelegate.shared?.updater != nil {
+                    Button("Check for Updates…") { AppDelegate.shared?.checkForUpdates() }
+                }
                 Button("Quit Tea") { NSApp.terminate(nil) }
             } label: {
                 Image(systemName: "slider.horizontal.3")
@@ -1335,12 +1339,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var badge: AnyCancellable?
     private var exporter: AnyCancellable?
     private let widget: WidgetExporter? = WidgetExporter.isAvailable ? WidgetExporter() : nil
+    // Sparkle, started only in release builds (build.sh --release sets TeaChecksForUpdates).
+    // Dev builds share the bundle ID and so the SU* defaults: once a release build has been
+    // allowed to check, an outdated dev build would offer to replace itself.
+    private(set) var updater: SPUStandardUpdaterController?
 
     private static let popoverSize = NSSize(width: 340, height: 600)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Self.shared = self
         Self.migrateDefaults()
+        if Bundle.main.object(forInfoDictionaryKey: "TeaChecksForUpdates") as? Bool == true {
+            updater = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: self)
+        }
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
@@ -1397,6 +1408,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     private func statusMenu() -> NSMenu {
         let menu = NSMenu()
+        if let updater {
+            // The controller validates the item, disabling it while a check is running.
+            let item = NSMenuItem(title: "Check for Updates…", action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)), keyEquivalent: "")
+            item.target = updater
+            menu.addItem(item)
+            menu.addItem(.separator())
+        }
         let quit = NSMenuItem(title: "Quit Tea", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "")
         quit.target = NSApp
         menu.addItem(quit)
@@ -1506,6 +1524,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         popover.performClose(nil)
     }
 
+    // Closes the popover first, so Sparkle's dialog isn't left behind it.
+    func checkForUpdates() {
+        closePopover()
+        updater?.checkForUpdates(nil)
+    }
+
     // The detach button.
     func detach() {
         let window = detachedWindow()
@@ -1544,4 +1568,10 @@ struct TeaApp: App {
     var body: some Scene {
         Settings { EmptyView() }
     }
+}
+
+// Tea is LSUIElement. Opting in silences Sparkle's warning about background apps, and lets
+// it show scheduled update alerts without stealing focus.
+extension AppDelegate: SPUStandardUserDriverDelegate {
+    nonisolated var supportsGentleScheduledUpdateReminders: Bool { true }
 }
